@@ -8,6 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+venv/
 
 # Environment variables
 .env
@@ -24,3 +25,20 @@ wheels/
 # OS
 .DS_Store
 Thumbs.db
+
+# Frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Media files (generated)
+media/audio/*.mp3
+media/audio/*.wav
+media/images/*.png
+media/images/*.jpg
+media/videos/*.mp4
+
+# Keep directory structure
+!media/audio/.gitkeep
+!media/images/.gitkeep
+!media/videos/.gitkeep

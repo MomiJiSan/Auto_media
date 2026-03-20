@@ -80,11 +80,18 @@ async def parse_script_to_storyboard(
     script: str,
     provider: str,
     model: str | None = None,
-) -> List[Shot]:
+) -> tuple[list[Shot], dict]:
+    """
+    Parse script to storyboard shots.
+
+    Returns:
+        tuple: (list of Shot objects, usage dict with prompt_tokens and completion_tokens)
+    """
     llm = get_llm_provider(provider, model=model)
-    raw = await llm.complete(
+    raw, usage = await llm.complete_with_usage(
         system=SYSTEM_PROMPT,
         user=USER_TEMPLATE.format(script=script),
         temperature=0.2,
     )
-    return _parse_shots(raw)
+    shots = _parse_shots(raw)
+    return shots, usage

@@ -11,5 +11,11 @@ class Shot(BaseModel):
     estimated_duration: int = Field(default=4, description="Estimated duration in seconds (3-5).")
 
 
+class Usage(BaseModel):
+    prompt_tokens: int = Field(default=0, description="Number of prompt tokens used")
+    completion_tokens: int = Field(default=0, description="Number of completion tokens used")
+
+
 class Storyboard(BaseModel):
     shots: List[Shot]
+    usage: Optional[Usage] = Field(default=None, description="Token usage information")

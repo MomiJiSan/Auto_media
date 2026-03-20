@@ -19,3 +19,9 @@ class PipelineStatusResponse(BaseModel):
     progress: int
     current_step: str
     error: Optional[str] = None
+
+
+class StoryboardRequest(BaseModel):
+    script: str
+    provider: Optional[str] = None
+    model: Optional[str] = None

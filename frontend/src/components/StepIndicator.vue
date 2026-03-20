@@ -30,13 +30,13 @@ import { useRouter } from 'vue-router'
 import { useStoryStore } from '../stores/story.js'
 
 const props = defineProps({ current: Number })
-const steps = ['输入灵感', '选择设定', '生成剧本', '预览导出']
-const lineWidth = `${((props.current - 1) / 3) * 100}%`
+const steps = ['输入灵感', '选择设定', '生成剧本', '预览导出', '视图生成']
+const lineWidth = `${((props.current - 1) / 4) * 100}%`
 
 const router = useRouter()
 const store = useStoryStore()
 
-const prevRoutes = { 2: '/step1', 3: '/step2', 4: '/step3' }
+const prevRoutes = { 2: '/step1', 3: '/step2', 4: '/step3', 5: '/step4' }
 
 function goBack() {
   store.setStep(props.current - 1)

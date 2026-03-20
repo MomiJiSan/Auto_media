@@ -18,93 +18,36 @@
 
       <div class="export-section">
         <ExportPanel />
-        <button class="video-btn" @click="generateVideo" :disabled="videoLoading">
-          {{ videoLoading ? `生成中 ${videoProgress}%` : '生成视频' }}
+        <button class="video-btn" @click="generateVideo">
+          场景分镜
         </button>
         <button class="restart-btn" @click="restart">重新创作</button>
-      </div>
-
-      <div v-if="videoStatus" class="video-status">
-        <div class="status-bar">
-          <div class="status-fill" :style="{ width: videoProgress + '%' }"></div>
-        </div>
-        <p class="status-text">{{ videoStatus }}</p>
-        <p v-if="videoError" class="status-error">{{ videoError }}</p>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref, onUnmounted } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import StepIndicator from '../components/StepIndicator.vue'
 import SceneStream from '../components/SceneStream.vue'
 import ExportPanel from '../components/ExportPanel.vue'
 import { useStoryStore } from '../stores/story.js'
-import { useSettingsStore } from '../stores/settings.js'
-import { finalizeScript, startStoryboard, getPipelineStatus } from '../api/story.js'
 
 const router = useRouter()
 const store = useStoryStore()
-const settings = useSettingsStore()
-
-const videoLoading = ref(false)
-const videoProgress = ref(0)
-const videoStatus = ref('')
-const videoError = ref('')
-let pollTimer = null
 
 onMounted(() => {
   if (!store.meta || !store.scenes.length) router.replace('/step1')
-})
-
-onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
 })
 
 const totalScenes = computed(() =>
   store.scenes.reduce((sum, s) => sum + s.scenes.length, 0)
 )
 
-async function generateVideo() {
-  videoLoading.value = true
-  videoError.value = ''
-  videoStatus.value = '正在序列化剧本...'
-  videoProgress.value = 5
-
-  try {
-    const { script } = await finalizeScript(store.storyId)
-    videoStatus.value = '正在解析分镜...'
-    videoProgress.value = 10
-    await startStoryboard(store.storyId, script, settings.provider || 'qwen')
-    videoStatus.value = '分镜解析完成，等待后续处理...'
-    videoProgress.value = 30
-
-    pollTimer = setInterval(async () => {
-      try {
-        const s = await getPipelineStatus(store.storyId)
-        videoProgress.value = s.progress
-        videoStatus.value = s.current_step
-        if (s.status === 'complete') {
-          clearInterval(pollTimer)
-          videoLoading.value = false
-        } else if (s.status === 'failed') {
-          clearInterval(pollTimer)
-          videoLoading.value = false
-          videoError.value = s.error || '生成失败'
-        }
-      } catch (e) {
-        clearInterval(pollTimer)
-        videoLoading.value = false
-        videoError.value = e.message
-      }
-    }, 2000)
-  } catch (e) {
-    videoLoading.value = false
-    videoError.value = e.message
-    videoStatus.value = ''
-  }
+function generateVideo() {
+  router.push('/video-generation')
 }
 
 function restart() {
@@ -159,20 +102,4 @@ h1 { font-size: 26px; font-weight: 700; margin-bottom: 6px; }
   border: 2px solid #e0e0e0;
 }
 .restart-btn:hover { border-color: #6c63ff; color: #6c63ff; }
-.video-status { margin-top: 20px; }
-.status-bar {
-  height: 6px;
-  background: #e0e0e0;
-  border-radius: 3px;
-  overflow: hidden;
-  margin-bottom: 8px;
-}
-.status-fill {
-  height: 100%;
-  background: #6c63ff;
-  border-radius: 3px;
-  transition: width 0.4s ease;
-}
-.status-text { font-size: 13px; color: #666; }
-.status-error { font-size: 13px; color: #e53935; margin-top: 4px; }
 </style>

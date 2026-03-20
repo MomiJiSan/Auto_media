@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,12 +34,17 @@ app.include_router(video.router)
 app.include_router(story.router)
 
 app.mount("/media", StaticFiles(directory="media"), name="media")
-app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 @app.get("/")
 async def index():
-    return FileResponse("static/index.html")
+    """API 根路径 - 前端请访问 http://localhost:5173"""
+    return JSONResponse({
+        "message": "AutoMedia API",
+        "version": "0.1.0",
+        "frontend": "http://localhost:5173",
+        "docs": "/docs"
+    })
 
 
 @app.get("/health")

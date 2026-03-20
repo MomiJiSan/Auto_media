@@ -16,3 +16,18 @@ class ClaudeProvider(BaseLLMProvider):
             messages=[{"role": "user", "content": user}],
         )
         return msg.content[0].text
+
+    async def complete_with_usage(self, system: str, user: str, temperature: float = 0.3) -> tuple[str, dict]:
+        msg = await self._client.messages.create(
+            model=self._model,
+            max_tokens=4096,
+            temperature=temperature,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+        usage_obj = getattr(msg, "usage", None)
+        usage = {
+            "prompt_tokens": usage_obj.input_tokens if usage_obj else 0,
+            "completion_tokens": usage_obj.output_tokens if usage_obj else 0,
+        }
+        return msg.content[0].text, usage
