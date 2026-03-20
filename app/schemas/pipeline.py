@@ -37,6 +37,12 @@ class PipelineStatusResponse(BaseModel):
     generated_files: Optional[dict] = None
 
 
+class StoryboardRequest(BaseModel):
+    script: str
+    provider: Optional[str] = None
+    model: Optional[str] = None
+
+
 class AutoGenerateRequest(BaseModel):
     """一键生成请求"""
     script: str
