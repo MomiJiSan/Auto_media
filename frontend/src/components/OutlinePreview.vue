@@ -10,30 +10,37 @@
     </div>
 
     <div class="section">
-      <h3>主要角色 <span class="hint-text">双击可编辑</span></h3>
+      <div class="section-header">
+        <h3>主要角色 <span class="hint-text">双击可编辑</span></h3>
+        <button class="ai-btn" @click="openCharacterChat(null)">✦ AI 助手</button>
+      </div>
       <div class="characters">
         <div
           v-for="c in characters"
           :key="c.name"
           class="char-card"
           :class="{ editing: editingChar === c.name }"
-          @dblclick="startEditChar(c)"
         >
-          <template v-if="editingChar === c.name">
-            <div class="char-edit-row">
-              <span class="char-name-static">{{ c.name }}</span>
-              <span class="char-role">{{ c.role }}</span>
+          <div class="char-header">
+            <div class="char-main" @dblclick="startEditChar(c)">
+              <template v-if="editingChar === c.name">
+                <div class="char-edit-row">
+                  <span class="char-name-static">{{ c.name }}</span>
+                  <span class="char-role">{{ c.role }}</span>
+                </div>
+                <textarea v-model="editCharDesc" class="edit-char-desc" rows="2" @keydown.esc="cancelEditChar" />
+                <div class="edit-actions">
+                  <button class="save-btn" @click="saveEditChar(c.name)">保存</button>
+                  <button class="cancel-btn" @click="cancelEditChar">取消</button>
+                </div>
+              </template>
+              <template v-else>
+                <div class="char-name">{{ c.name }} <span class="char-role">{{ c.role }}</span></div>
+                <div class="char-desc">{{ c.description }}</div>
+              </template>
             </div>
-            <textarea v-model="editCharDesc" class="edit-char-desc" rows="2" @keydown.esc="cancelEditChar" />
-            <div class="edit-actions">
-              <button class="save-btn" @click="saveEditChar(c.name)">保存</button>
-              <button class="cancel-btn" @click="cancelEditChar">取消</button>
-            </div>
-          </template>
-          <template v-else>
-            <div class="char-name">{{ c.name }} <span class="char-role">{{ c.role }}</span></div>
-            <div class="char-desc">{{ c.description }}</div>
-          </template>
+            <button class="ai-icon-btn" @click="openCharacterChat(c)" title="AI 修改此角色">✦</button>
+          </div>
         </div>
       </div>
     </div>
@@ -46,10 +53,11 @@
           :key="ep.episode"
           class="ep-item"
           :class="{ editing: editingEp === ep.episode }"
-          @dblclick="startEdit(ep)"
         >
-          <div class="ep-num">第 {{ ep.episode }} 集</div>
-          <div class="ep-content">
+          <div class="ep-left">
+            <div class="ep-num">第 {{ ep.episode }} 集</div>
+          </div>
+          <div class="ep-content" @dblclick="startEdit(ep)">
             <template v-if="editingEp === ep.episode">
               <input v-model="editTitle" class="edit-title" @keydown.enter="saveEdit" @keydown.esc="cancelEdit" />
               <textarea v-model="editSummary" class="edit-summary" rows="3" @keydown.esc="cancelEdit" />
@@ -63,9 +71,21 @@
               <div class="ep-summary">{{ ep.summary }}</div>
             </template>
           </div>
+          <button class="ai-icon-btn" @click="openEpisodeChat(ep)" title="AI 修改此集">✦</button>
         </div>
       </div>
     </div>
+
+    <CharacterChatPanel
+      :show="characterChatOpen"
+      :character="selectedCharacter"
+      @close="characterChatOpen = false"
+    />
+    <EpisodeChatPanel
+      :show="episodeChatOpen"
+      :episode="selectedEpisode"
+      @close="episodeChatOpen = false"
+    />
   </div>
 </template>
 
@@ -73,6 +93,8 @@
 import { ref } from 'vue'
 import { useStoryStore } from '../stores/story.js'
 import { refineStory } from '../api/story.js'
+import CharacterChatPanel from './CharacterChatPanel.vue'
+import EpisodeChatPanel from './EpisodeChatPanel.vue'
 
 defineProps({ meta: Object, characters: Array, outline: Array })
 
@@ -82,6 +104,10 @@ const editTitle = ref('')
 const editSummary = ref('')
 const editingChar = ref(null)
 const editCharDesc = ref('')
+const characterChatOpen = ref(false)
+const selectedCharacter = ref(null)
+const episodeChatOpen = ref(false)
+const selectedEpisode = ref(null)
 
 function startEdit(ep) {
   editingEp.value = ep.episode
@@ -120,6 +146,16 @@ function saveEditChar(name) {
 function cancelEditChar() {
   editingChar.value = null
 }
+
+function openCharacterChat(character) {
+  selectedCharacter.value = character
+  characterChatOpen.value = true
+}
+
+function openEpisodeChat(episode) {
+  selectedEpisode.value = episode
+  episodeChatOpen.value = true
+}
 </script>
 
 <style scoped>
@@ -139,21 +175,46 @@ function cancelEditChar() {
   font-size: 12px;
 }
 .theme { font-size: 14px; opacity: 0.9; line-height: 1.6; }
-.section h3 { font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #333; display: flex; align-items: center; gap: 8px; }
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.section h3 { font-size: 16px; font-weight: 600; color: #333; display: flex; align-items: center; gap: 8px; }
 .hint-text { font-size: 11px; color: #bbb; font-weight: 400; }
+.ai-btn {
+  padding: 6px 14px;
+  background: linear-gradient(135deg, #6c63ff, #a78bfa);
+  color: #fff;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.2s;
+}
+.ai-btn:hover { opacity: 0.85; }
 .characters { display: flex; flex-direction: column; gap: 10px; }
 .char-card {
   background: #fff;
   border-radius: 10px;
   padding: 12px 16px;
   border-left: 4px solid #6c63ff;
-  cursor: pointer;
   transition: box-shadow 0.2s, border-color 0.2s;
   border: 2px solid transparent;
   border-left: 4px solid #6c63ff;
 }
 .char-card:hover { box-shadow: 0 2px 10px rgba(108,99,255,0.1); }
-.char-card.editing { border-color: #6c63ff; box-shadow: 0 0 0 3px rgba(108,99,255,0.1); cursor: default; }
+.char-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.char-main {
+  flex: 1;
+  cursor: pointer;
+}
 .char-edit-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .char-name-static { font-weight: 600; font-size: 15px; white-space: nowrap; }
 .edit-char-role {
@@ -190,27 +251,38 @@ function cancelEditChar() {
   font-weight: 400;
 }
 .char-desc { font-size: 13px; color: #666; }
+.ai-icon-btn {
+  padding: 4px 8px;
+  background: linear-gradient(135deg, #6c63ff, #a78bfa);
+  color: #fff;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.2s, transform 0.2s;
+  flex-shrink: 0;
+}
+.ai-icon-btn:hover { opacity: 1; transform: scale(1.1); }
 .outline-list { display: flex; flex-direction: column; gap: 8px; }
 .ep-item {
   display: flex;
   gap: 12px;
+  align-items: flex-start;
   background: #fff;
   border-radius: 10px;
   padding: 12px 16px;
-  cursor: pointer;
   transition: box-shadow 0.2s, border-color 0.2s;
   border: 2px solid transparent;
 }
 .ep-item:hover { box-shadow: 0 2px 10px rgba(108,99,255,0.1); border-color: #e0d9ff; }
-.ep-item.editing { border-color: #6c63ff; box-shadow: 0 0 0 3px rgba(108,99,255,0.1); cursor: default; }
+.ep-left { flex-shrink: 0; padding-top: 2px; }
 .ep-num {
   font-size: 12px;
   color: #6c63ff;
   font-weight: 600;
   white-space: nowrap;
-  padding-top: 2px;
 }
-.ep-content { flex: 1; min-width: 0; }
+.ep-content { flex: 1; min-width: 0; cursor: pointer; }
 .ep-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
 .ep-summary { font-size: 13px; color: #666; line-height: 1.5; }
 .edit-title {
