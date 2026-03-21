@@ -1,4 +1,6 @@
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Body
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Body, Depends, Request
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.database import get_db, AsyncSessionLocal
 from app.schemas.pipeline import (
     PipelineStatusResponse,
     PipelineStatus,
@@ -10,25 +12,10 @@ from app.schemas.pipeline import (
 from app.schemas.storyboard import Storyboard
 from app.services.storyboard import parse_script_to_storyboard
 from app.services.pipeline_executor import PipelineExecutor
+from app.services import story_repository as repo
+from uuid import uuid4
 
 router = APIRouter(prefix="/api/v1/pipeline", tags=["pipeline"])
-
-# 全局流水线状态存储
-_pipeline: dict = {}
-
-
-def _get_or_create(project_id: str) -> dict:
-    """获取或创建流水线状态"""
-    if project_id not in _pipeline:
-        _pipeline[project_id] = {
-            "status": PipelineStatus.PENDING,
-            "progress": 0,
-            "current_step": "等待开始",
-            "error": None,
-            "progress_detail": None,
-            "generated_files": None,
-        }
-    return _pipeline[project_id]
 
 
 @router.post("/{project_id}/auto-generate", response_model=AutoGenerateResponse)
@@ -44,31 +31,34 @@ async def auto_generate(
     - separated: TTS → 图片 → 图生视频 → FFmpeg 合成
     - integrated: 图片 → 视频语音一体生成
     """
-    state = _get_or_create(project_id)
-
-    # 重置状态
-    state.update(
-        status=PipelineStatus.PENDING,
-        progress=0,
-        current_step="准备开始",
-        error=None,
-        progress_detail=None,
-        generated_files=None,
-    )
+    # 创建新的 pipeline 记录
+    pipeline_id = str(uuid4())
 
     async def _run_pipeline():
         """后台执行流水线"""
-        executor = PipelineExecutor(project_id, state)
-        await executor.run_full_pipeline(
-            script=req.script,
-            strategy=req.strategy,
-            provider=req.provider,
-            model=req.model,
-            voice=req.voice,
-            image_model=req.image_model,
-            video_model=req.video_model,
-            base_url=req.base_url,
-        )
+        # 创建新的数据库会话用于后台任务
+        async with AsyncSessionLocal() as db_session:
+            # 初始化 pipeline 状态
+            await repo.save_pipeline(db_session, pipeline_id, project_id, {
+                "status": PipelineStatus.PENDING,
+                "progress": 0,
+                "current_step": "准备开始",
+                "error": None,
+                "progress_detail": None,
+                "generated_files": None,
+            })
+
+            executor = PipelineExecutor(project_id, pipeline_id, db_session)
+            await executor.run_full_pipeline(
+                script=req.script,
+                strategy=req.strategy,
+                provider=req.provider,
+                model=req.model,
+                voice=req.voice,
+                image_model=req.image_model,
+                video_model=req.video_model,
+                base_url=req.base_url,
+            )
 
     background_tasks.add_task(_run_pipeline)
 
@@ -82,23 +72,45 @@ async def auto_generate(
 @router.post("/{project_id}/storyboard", response_model=Storyboard)
 async def generate_storyboard(
     project_id: str,
-    request: StoryboardRequest = Body(...),
+    request: Request,
+    req: StoryboardRequest = Body(...),
+    db: AsyncSession = Depends(get_db),
 ):
     """手动触发：分镜解析"""
-    state = _get_or_create(project_id)
-    state.update(status=PipelineStatus.STORYBOARD, progress=10, current_step="解析分镜中")
+    pipeline_id = str(uuid4())
+
+    # 从 headers 获取 LLM 配置
+    api_key = request.headers.get("X-LLM-API-Key", "")
+    base_url = request.headers.get("X-LLM-Base-URL", "")
+    provider = request.headers.get("X-LLM-Provider", req.provider or "claude")
+
+    # 创建 pipeline 记录
+    await repo.save_pipeline(db, pipeline_id, project_id, {
+        "status": PipelineStatus.STORYBOARD,
+        "progress": 10,
+        "current_step": "解析分镜中",
+    })
 
     try:
         shots, usage = await parse_script_to_storyboard(
-            request.script,
-            provider=request.provider or "claude",
-            model=request.model
+            req.script,
+            provider=provider,
+            model=req.model,
+            api_key=api_key,
+            base_url=base_url,
         )
     except Exception as e:
-        state.update(status=PipelineStatus.FAILED, error=str(e))
+        await repo.save_pipeline(db, pipeline_id, project_id, {
+            "status": PipelineStatus.FAILED,
+            "error": str(e),
+        })
         raise HTTPException(status_code=500, detail=f"分镜解析失败: {e}") from e
 
-    state.update(progress=30, current_step="分镜解析完成")
+    await repo.save_pipeline(db, pipeline_id, project_id, {
+        "progress": 30,
+        "current_step": "分镜解析完成",
+    })
+
     return Storyboard(
         shots=shots,
         usage={
@@ -227,17 +239,41 @@ async def render_video(
 
 
 @router.get("/{project_id}/status", response_model=PipelineStatusResponse)
-async def get_status(project_id: str):
-    """获取流水线状态"""
-    state = _get_or_create(project_id)
+async def get_status(project_id: str, pipeline_id: str = None, db: AsyncSession = Depends(get_db)):
+    """
+    获取流水线状态
+
+    参数：
+    - project_id: 项目 ID
+    - pipeline_id: 流水线 ID（可选，如果不提供则返回最新的）
+    """
+    if pipeline_id:
+        # 获取指定的 pipeline
+        pipeline = await repo.get_pipeline(db, pipeline_id)
+        if not pipeline:
+            raise HTTPException(status_code=404, detail="Pipeline not found")
+    else:
+        # 获取最新的 pipeline
+        pipeline = await repo.get_pipeline_by_story(db, project_id)
+        if not pipeline:
+            # 如果没有 pipeline，返回默认状态
+            pipeline = {
+                "status": PipelineStatus.PENDING,
+                "progress": 0,
+                "current_step": "等待开始",
+                "error": None,
+                "progress_detail": None,
+                "generated_files": None,
+            }
+
     return PipelineStatusResponse(
         project_id=project_id,
-        status=state["status"],
-        progress=state["progress"],
-        current_step=state["current_step"],
-        error=state.get("error"),
-        progress_detail=state.get("progress_detail"),
-        generated_files=state.get("generated_files"),
+        status=pipeline.get("status", PipelineStatus.PENDING),
+        progress=pipeline.get("progress", 0),
+        current_step=pipeline.get("current_step", "等待开始"),
+        error=pipeline.get("error"),
+        progress_detail=pipeline.get("progress_detail"),
+        generated_files=pipeline.get("generated_files"),
     )
 
 

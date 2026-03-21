@@ -611,7 +611,11 @@ async function parseStoryboard() {
         'Content-Type': 'application/json',
         ...getHeaders()
       },
-      body: JSON.stringify({ script })
+      body: JSON.stringify({
+        script,
+        provider: settings.provider,
+        model: settings.model
+      })
     })
 
     if (!res.ok) {

@@ -80,14 +80,23 @@ async def parse_script_to_storyboard(
     script: str,
     provider: str,
     model: str | None = None,
+    api_key: str = "",
+    base_url: str = "",
 ) -> tuple[list[Shot], dict]:
     """
     Parse script to storyboard shots.
 
+    Args:
+        script: The script text to parse
+        provider: LLM provider name (claude, openai, qwen, zhipu, gemini)
+        model: Model name (optional)
+        api_key: API key for the provider (optional, will use settings if not provided)
+        base_url: Base URL for the provider (optional, will use settings if not provided)
+
     Returns:
         tuple: (list of Shot objects, usage dict with prompt_tokens and completion_tokens)
     """
-    llm = get_llm_provider(provider, model=model)
+    llm = get_llm_provider(provider, model=model, api_key=api_key, base_url=base_url)
     raw, usage = await llm.complete_with_usage(
         system=SYSTEM_PROMPT,
         user=USER_TEMPLATE.format(script=script),
