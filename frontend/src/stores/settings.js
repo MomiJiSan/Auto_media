@@ -6,7 +6,7 @@ const PROVIDERS = [
   { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1' },
   { id: 'qwen', label: '阿里云 Qwen', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
   { id: 'zhipu', label: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4/' },
-  { id: 'gemini', label: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta' },
+  { id: 'gemini', label: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/' },
   { id: 'custom', label: '自定义', baseUrl: '' },
 ]
 

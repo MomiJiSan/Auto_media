@@ -193,6 +193,7 @@ function getCharacterUrl(path) {
 }
 
 export async function generateCharacterImage(storyId, character) {
+  const settings = useSettingsStore()
   const res = await fetch(getCharacterUrl('/generate'), {
     method: 'POST',
     headers: getHeaders(),
@@ -201,6 +202,7 @@ export async function generateCharacterImage(storyId, character) {
       character_name: character.name,
       role: character.role || '',
       description: character.description || '',
+      ...(settings.effectiveImageModel ? { model: settings.effectiveImageModel } : {}),
     }),
   })
   if (!res.ok) {
@@ -211,12 +213,14 @@ export async function generateCharacterImage(storyId, character) {
 }
 
 export async function generateAllCharacterImages(storyId, characters) {
+  const settings = useSettingsStore()
   const res = await fetch(getCharacterUrl('/generate-all'), {
     method: 'POST',
     headers: getHeaders(),
     body: JSON.stringify({
       story_id: storyId,
       characters: characters,
+      ...(settings.effectiveImageModel ? { model: settings.effectiveImageModel } : {}),
     }),
   })
   if (!res.ok) {
