@@ -182,13 +182,13 @@ async def refine(story_id: str, change_type: str, change_summary: str, db: Async
 
     # 写回数据库，保持 DB 与前端状态同步
     updates = {}
-    if "characters" in data:
+    if data.get("characters") is not None:
         updates["characters"] = data["characters"]
-    if "relationships" in data:
+    if data.get("relationships") is not None:
         updates["relationships"] = data["relationships"]
-    if "outline" in data:
+    if data.get("outline") is not None:
         updates["outline"] = data["outline"]
-    if "meta_theme" in data and data["meta_theme"]:
+    if data.get("meta_theme"):
         updates["meta"] = {"theme": data["meta_theme"]}
     if updates:
         await repo.save_story(db, story_id, updates)

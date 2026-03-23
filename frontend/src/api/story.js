@@ -133,15 +133,17 @@ export async function applyChatChanges(storyId, changeType, chatHistory, current
   return res.json()
 }
 
-export async function streamChat(storyId, message, onChunk, onDone, onError) {
+export async function streamChat(storyId, message, onChunk, onDone, onError, signal) {
   let res
   try {
     res = await fetch(getUrl('/chat'), {
       method: 'POST',
       headers: getHeaders(),
       body: JSON.stringify({ story_id: storyId, message }),
+      signal,
     })
   } catch (e) {
+    if (e.name === 'AbortError') return
     onError?.(e.message); return
   }
   if (!res.ok) { onError?.(`请求失败 (${res.status})`); return }
@@ -154,6 +156,7 @@ export async function streamChat(storyId, message, onChunk, onDone, onError) {
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
+      if (signal?.aborted) { reader.cancel(); return }
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n')
       buffer = lines.pop()
@@ -166,20 +169,23 @@ export async function streamChat(storyId, message, onChunk, onDone, onError) {
       }
     }
   } catch (e) {
+    if (e.name === 'AbortError') return
     onError?.(e.message); return
   }
   onDone()
 }
 
-export async function streamScript(storyId, onScene, onDone, onError) {
+export async function streamScript(storyId, onScene, onDone, onError, signal) {
   let res
   try {
     res = await fetch(getUrl('/generate-script'), {
       method: 'POST',
       headers: getHeaders(),
       body: JSON.stringify({ story_id: storyId }),
+      signal,
     })
   } catch (e) {
+    if (e.name === 'AbortError') return
     onError?.(e.message); return
   }
   if (!res.ok) { onError?.(`请求失败 (${res.status})`); return }
@@ -192,6 +198,7 @@ export async function streamScript(storyId, onScene, onDone, onError) {
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
+      if (signal?.aborted) { reader.cancel(); return }
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n')
       buffer = lines.pop()
@@ -210,6 +217,7 @@ export async function streamScript(storyId, onScene, onDone, onError) {
       }
     }
   } catch (e) {
+    if (e.name === 'AbortError') return
     onError?.(e.message); return
   }
   onDone()

@@ -91,7 +91,7 @@
 </template>
 
 <script setup>
-import { ref, nextTick, watch, onMounted, onUnmounted } from 'vue'
+import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import StepIndicator from '../components/StepIndicator.vue'
 import ApiKeyModal from '../components/ApiKeyModal.vue'
@@ -170,8 +170,8 @@ async function submitTurn() {
     if (result.status === 'complete') {
       complete.value = true
       const outline = await generateOutline(store.storyId, result.world_summary)
-      store.setOutlineResult(outline)
       if (!isMounted.value) return
+      store.setOutlineResult(outline)
       store.setStep(3)
       router.push('/step3')
     }
