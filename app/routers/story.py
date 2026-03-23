@@ -11,6 +11,41 @@ from app.core.api_keys import llm_config_dep
 router = APIRouter(prefix="/api/v1/story", tags=["story"])
 
 
+@router.get("/")
+async def list_stories(db: AsyncSession = Depends(get_db)):
+    """获取所有已保存的剧本列表"""
+    stories = await repo.list_stories(db)
+    # 补充每个故事的场景数量
+    result = []
+    for s in stories:
+        full = await repo.get_story(db, s["id"])
+        scene_count = sum(len(ep.get("scenes", [])) for ep in full.get("scenes", []))
+        result.append({
+            **s,
+            "scene_count": scene_count,
+            "has_script": len(full.get("scenes", [])) > 0,
+        })
+    return result
+
+
+@router.get("/{story_id}")
+async def get_story(story_id: str, db: AsyncSession = Depends(get_db)):
+    """获取单个剧本的完整数据，用于恢复前端状态"""
+    story = await repo.get_story(db, story_id)
+    if not story:
+        raise HTTPException(status_code=404, detail="剧本不存在")
+    return story
+
+
+@router.delete("/{story_id}")
+async def delete_story(story_id: str, db: AsyncSession = Depends(get_db)):
+    """删除剧本"""
+    ok = await repo.delete_story(db, story_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="剧本不存在")
+    return {"ok": True}
+
+
 @router.post("/analyze-idea")
 async def api_analyze_idea(req: AnalyzeIdeaRequest, llm: dict = Depends(llm_config_dep), db: AsyncSession = Depends(get_db)):
     return await analyze_idea(req.idea, req.genre, req.tone, db=db, **llm)
