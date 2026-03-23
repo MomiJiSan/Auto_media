@@ -43,7 +43,7 @@ export const useStoryStore = defineStore('story', {
       this.storyId = story_id
       if (meta != null) this.meta = meta
       if (characters != null && characters.length > 0) this.characters = characters
-      this.relationships = relationships ?? []
+      if (relationships != null && relationships.length > 0) this.relationships = relationships
       if (outline != null && outline.length > 0) this.outline = outline
       if (usage) {
         this.usage.prompt_tokens += usage.prompt_tokens
