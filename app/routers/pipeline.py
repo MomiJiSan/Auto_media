@@ -10,6 +10,8 @@ from app.schemas.pipeline import (
     AutoGenerateResponse,
     GenerationStrategy,
     StoryboardRequest,
+    ConcatRequest,
+    ConcatResponse,
 )
 from app.schemas.storyboard import Storyboard
 from app.services.storyboard import parse_script_to_storyboard
@@ -322,6 +324,40 @@ async def get_status(project_id: str, pipeline_id: str = None, db: AsyncSession 
         progress_detail=pipeline.get("progress_detail"),
         generated_files=pipeline.get("generated_files"),
     )
+
+
+@router.post("/{project_id}/concat", response_model=ConcatResponse)
+async def concat_videos(
+    project_id: str,
+    req: ConcatRequest,
+    request: Request,
+):
+    """
+    将多个镜头视频按顺序拼接为一个完整 MP4。
+
+    使用 ffmpeg concat + stream copy，不重编码，速度极快。
+    """
+    from app.services.ffmpeg import concat_videos as do_concat, _url_to_local_path, VIDEO_DIR
+
+    if not req.video_urls:
+        raise HTTPException(status_code=400, detail="视频列表为空")
+
+    base_url = str(request.base_url).rstrip("/")
+
+    # URL → 本地路径
+    local_paths = [_url_to_local_path(url, base_url) for url in req.video_urls]
+
+    output_path = str(VIDEO_DIR / f"episode_{project_id}.mp4")
+
+    try:
+        await do_concat(local_paths, output_path)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    video_url = f"/{output_path}"
+    return ConcatResponse(video_url=video_url)
 
 
 @router.post("/{project_id}/stitch")
