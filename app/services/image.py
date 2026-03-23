@@ -19,6 +19,14 @@ DEFAULT_MODEL = "black-forest-labs/FLUX.1-schnell"
 IMAGE_SIZE = "1280x720"
 CHARACTER_SIZE = "1024x1024"
 
+# 火山方舟要求最少 3,686,400 像素（SiliconFlow 无此限制）
+ARK_IMAGE_SIZE = "2560x1440"
+ARK_CHARACTER_SIZE = "1920x1920"
+
+
+def _is_ark(base_url: str) -> bool:
+    return "volces.com" in base_url or "volcengine" in base_url
+
 
 async def generate_image(visual_prompt: str, shot_id: str, model: str = DEFAULT_MODEL, image_api_key: str = "", image_base_url: str = "") -> dict:
     """Generate image for a single shot. Returns { shot_id, image_path, image_url }."""
@@ -26,16 +34,23 @@ async def generate_image(visual_prompt: str, shot_id: str, model: str = DEFAULT_
     if image_base_url and not image_api_key:
         raise HTTPException(status_code=400, detail="提供自定义 image_base_url 时必须同时提供 image_api_key")
     image_api_key = image_api_key or settings.siliconflow_api_key
+    size = ARK_IMAGE_SIZE if _is_ark(base_url) else IMAGE_SIZE
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
             f"{base_url}/images/generations",
             headers={"Authorization": f"Bearer {image_api_key}"},
-            json={"model": model, "prompt": visual_prompt, "n": 1, "image_size": IMAGE_SIZE},
+            json={"model": model, "prompt": visual_prompt, "n": 1, "size": size, "response_format": "url"},
         )
         print(f"[IMAGE] status={resp.status_code} key={mask_key(image_api_key)} base={base_url}")
         if not resp.is_success:
             raise RuntimeError(f"图片生成 API 错误 {resp.status_code}: {resp.text[:200]}")
-        image_url = resp.json()["images"][0]["url"]
+        body = resp.json()
+        if "images" in body:
+            image_url = body["images"][0]["url"]
+        elif "data" in body:
+            image_url = body["data"][0]["url"]
+        else:
+            raise RuntimeError(f"图片生成 API 响应格式未知: {list(body.keys())}")
 
         # Download and save locally
         img_resp = await client.get(image_url)
@@ -82,17 +97,24 @@ async def generate_character_image(
     if image_base_url and not image_api_key:
         raise HTTPException(status_code=400, detail="提供自定义 image_base_url 时必须同时提供 image_api_key")
     image_api_key = image_api_key or settings.siliconflow_api_key
+    size = ARK_CHARACTER_SIZE if _is_ark(base_url) else CHARACTER_SIZE
 
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
             f"{base_url}/images/generations",
             headers={"Authorization": f"Bearer {image_api_key}"},
-            json={"model": model, "prompt": prompt, "n": 1, "image_size": CHARACTER_SIZE},
+            json={"model": model, "prompt": prompt, "n": 1, "size": size, "response_format": "url"},
         )
         print(f"[CHARACTER IMAGE] status={resp.status_code} key={mask_key(image_api_key)} base={base_url} for {character_name}")
         if not resp.is_success:
-            raise RuntimeError(f"角色图生成 API 错误 {resp.status_code}: {resp.text[:200]}")
-        image_url = resp.json()["images"][0]["url"]
+            raise RuntimeError(f"角色图生成 API 错误 {resp.status_code}: {resp.text[:500]}")
+        body = resp.json()
+        if "images" in body:
+            image_url = body["images"][0]["url"]
+        elif "data" in body:
+            image_url = body["data"][0]["url"]
+        else:
+            raise RuntimeError(f"角色图生成 API 响应格式未知: {list(body.keys())}")
 
         img_resp = await client.get(image_url)
         img_resp.raise_for_status()
