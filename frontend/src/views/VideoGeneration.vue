@@ -674,8 +674,9 @@ function getHeaders() {
   if (settings.effectiveLlmProvider) headers['X-LLM-Provider']  = settings.effectiveLlmProvider
   if (settings.effectiveImageApiKey)  headers['X-Image-API-Key']  = settings.effectiveImageApiKey
   if (settings.effectiveImageBaseUrl) headers['X-Image-Base-URL'] = settings.effectiveImageBaseUrl
-  if (settings.effectiveVideoApiKey)  headers['X-Video-API-Key']  = settings.effectiveVideoApiKey
-  if (settings.effectiveVideoBaseUrl) headers['X-Video-Base-URL'] = settings.effectiveVideoBaseUrl
+  if (settings.effectiveVideoApiKey)    headers['X-Video-API-Key']    = settings.effectiveVideoApiKey
+  if (settings.effectiveVideoBaseUrl)   headers['X-Video-Base-URL']   = settings.effectiveVideoBaseUrl
+  if (settings.effectiveVideoProvider)  headers['X-Video-Provider']   = settings.effectiveVideoProvider
   return headers
 }
 
