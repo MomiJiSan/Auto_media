@@ -15,6 +15,7 @@ export const useStoryStore = defineStore('story', {
     relationships: [],
     outline: [],
     scenes: [],
+    step3Done: false,
     shots: [],
     usage: { prompt_tokens: 0, completion_tokens: 0 },
     wbHistory: [],
@@ -57,7 +58,7 @@ export const useStoryStore = defineStore('story', {
         this.scenes.push(scene)
       }
     },
-    resetScenes() { this.scenes = [] },
+    resetScenes() { this.scenes = []; this.step3Done = false },
     setShots(shots) {
       this.shots = shots.map(s => ({ ...s, ttsLoading: false, imageLoading: false, videoLoading: false }))
     },

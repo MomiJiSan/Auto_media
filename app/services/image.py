@@ -28,6 +28,25 @@ def _is_ark(base_url: str) -> bool:
     return "volces.com" in base_url or "volcengine" in base_url
 
 
+def _extract_image_url(resp) -> str:
+    """Parse image URL from API response with clear error messages."""
+    try:
+        body = resp.json()
+    except Exception as exc:
+        raise RuntimeError(
+            f"图片 API 响应非 JSON (status={resp.status_code}): {resp.text[:200]}"
+        ) from exc
+    if not isinstance(body, dict):
+        raise RuntimeError(f"图片 API 响应格式异常 (status={resp.status_code}): {str(body)[:200]}")
+    for key in ("images", "data"):
+        items = body.get(key)
+        if isinstance(items, list) and items and isinstance(items[0], dict) and "url" in items[0]:
+            return items[0]["url"]
+    raise RuntimeError(
+        f"图片 API 响应缺少 url (status={resp.status_code}, keys={list(body.keys())}, body={str(body)[:200]})"
+    )
+
+
 async def generate_image(visual_prompt: str, shot_id: str, model: str = DEFAULT_MODEL, image_api_key: str = "", image_base_url: str = "") -> dict:
     """Generate image for a single shot. Returns { shot_id, image_path, image_url }."""
     base_url = image_base_url or settings.siliconflow_base_url
@@ -44,13 +63,7 @@ async def generate_image(visual_prompt: str, shot_id: str, model: str = DEFAULT_
         print(f"[IMAGE] status={resp.status_code} key={mask_key(image_api_key)} base={base_url}")
         if not resp.is_success:
             raise RuntimeError(f"图片生成 API 错误 {resp.status_code}: {resp.text[:200]}")
-        body = resp.json()
-        if "images" in body:
-            image_url = body["images"][0]["url"]
-        elif "data" in body:
-            image_url = body["data"][0]["url"]
-        else:
-            raise RuntimeError(f"图片生成 API 响应格式未知: {list(body.keys())}")
+        image_url = _extract_image_url(resp)
 
         # Download and save locally
         img_resp = await client.get(image_url)
@@ -119,13 +132,7 @@ async def generate_character_image(
         print(f"[CHARACTER IMAGE] status={resp.status_code} key={mask_key(image_api_key)} base={base_url} for {character_name}")
         if not resp.is_success:
             raise RuntimeError(f"角色图生成 API 错误 {resp.status_code}: {resp.text[:500]}")
-        body = resp.json()
-        if "images" in body:
-            image_url = body["images"][0]["url"]
-        elif "data" in body:
-            image_url = body["data"][0]["url"]
-        else:
-            raise RuntimeError(f"角色图生成 API 响应格式未知: {list(body.keys())}")
+        image_url = _extract_image_url(resp)
 
         img_resp = await client.get(image_url)
         img_resp.raise_for_status()

@@ -89,7 +89,7 @@ const keyModalType = ref('missing')
 const keyModalMsg = ref('')
 
 onMounted(() => {
-  if (store.scenes.length > 0) {
+  if (store.step3Done) {
     started.value = true
     done.value = true
   }
@@ -108,7 +108,7 @@ async function startGenerate() {
   await streamScript(
     store.storyId,
     (scene) => store.addScene(scene),
-    () => { streaming.value = false; done.value = true; store.setStep(4) },
+    () => { streaming.value = false; done.value = true; store.step3Done = true; store.setStep(4) },
     (msg) => {
       streaming.value = false
       if (isAuthError(msg)) {
