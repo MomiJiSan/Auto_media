@@ -235,7 +235,7 @@
                 <span class="tag">{{ shot.estimated_duration }}s</span>
               </div>
             </div>
-            <div v-if="(shot.audio_reference?.content || shot.dialogue) && shot.audio_reference?.type !== 'sfx'" class="shot-field">
+            <div v-if="hasSpeechAudio(shot)" class="shot-field">
               <label>台词 / 旁白</label>
               <p>{{ shot.audio_reference?.content || shot.dialogue }}</p>
             </div>
@@ -249,7 +249,7 @@
             </div>
 
             <!-- TTS controls -->
-            <div v-if="(shot.audio_reference?.content || shot.dialogue) && shot.audio_reference?.type !== 'sfx'" class="tts-bar">
+            <div v-if="hasSpeechAudio(shot)" class="tts-bar">
               <button class="tts-btn" @click="generateOneTTS(shot.shot_id)" :disabled="shot.ttsLoading">
                 {{ shot.ttsLoading ? '生成中...' : '生成语音' }}
               </button>
@@ -758,11 +758,15 @@ async function loadVoices() {
   }
 }
 
+function hasSpeechAudio(shot) {
+  return !!(shot && (shot.audio_reference?.content || shot.dialogue) && shot.audio_reference?.type !== 'sfx')
+}
+
 async function generateOneTTS(shotId) {
   // Edge TTS 不需要 API Key，无需守卫
 
   const shot = shots.value.find(s => s.shot_id === shotId)
-  if (!shot || !(shot.audio_reference?.content || shot.dialogue) || shot.audio_reference?.type === 'sfx') return
+  if (!hasSpeechAudio(shot)) return
 
   shot.ttsLoading = true
   try {
@@ -796,7 +800,7 @@ async function generateOneTTS(shotId) {
 }
 
 async function generateAllTTS() {
-  const shotsWithDialogue = shots.value.filter(s => (s.audio_reference?.content || s.dialogue) && s.audio_reference?.type !== 'sfx')
+  const shotsWithDialogue = shots.value.filter(hasSpeechAudio)
   isGenerating.value = true
   try {
     await runWithConcurrency(shotsWithDialogue, s => generateOneTTS(s.shot_id))
