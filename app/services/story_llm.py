@@ -201,8 +201,9 @@ async def refine(story_id: str, change_type: str, change_summary: str, db: Async
         updates["relationships"] = data["relationships"]
     if data.get("outline") is not None:
         updates["outline"] = data["outline"]
-    if data.get("meta_theme"):
-        updates["meta"] = {"theme": data["meta_theme"]}
+    if data.get("meta_theme") is not None:
+        existing_meta = story.get("meta") or {}
+        updates["meta"] = {**existing_meta, "theme": data["meta_theme"]}
     if updates:
         await repo.save_story(db, story_id, updates)
 
