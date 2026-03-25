@@ -64,16 +64,17 @@ class ClaudeProvider(BaseLLMProvider):
         system: str = "",
         temperature: float = 0.3,
         enable_caching: bool = False,
-        _cache_key: str = "",
+        cache_key: str = "",
         cache_threshold_tokens: int = 1024,
     ) -> tuple[str, dict]:
+        del cache_key
         stable_token_budget = 0
         if system:
             stable_token_budget += estimate_tokens({"role": "system", "content": system})
         for message in messages:
-            if message.get("cache_control"):
-                break
             stable_token_budget += estimate_tokens(message)
+            if message.get("cacheable"):
+                break
         use_caching = enable_caching and stable_token_budget >= cache_threshold_tokens
 
         request_messages = []

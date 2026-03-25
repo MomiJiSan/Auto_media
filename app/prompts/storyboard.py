@@ -78,7 +78,8 @@ Your task: convert the provided Chinese Audio-Visual Script into a strict JSON a
 ### Law 3: Character Consistency Embedding
 - If "角色信息" (Character Info) is provided, use the EXACT physical appearance in every shot featuring that character.
 - ALWAYS include in `subject_and_clothing`: age, gender, ethnicity, hair (style + color + length), clothing (material + color + texture + condition), body type, distinguishing features.
-- If a "外观提示词" (portrait prompt) or Visual DNA is given, embed it verbatim into `subject_and_clothing`, `image_prompt`, and `final_video_prompt`.
+- If clean character reference text or Visual DNA is given, preserve those physical traits exactly in `subject_and_clothing`.
+- Do NOT blindly paste portrait/avatar/studio prompt wording into every field. Exclude studio backdrops, clean background, camera-test phrasing, and similar non-scene text.
 - When multiple characters appear, describe EACH one fully.
 - **Consistency check: Ensure clothing/appearance remains consistent across consecutive shots of the same scene (unless explicitly changed in script).**
 

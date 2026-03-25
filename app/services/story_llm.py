@@ -212,6 +212,7 @@ async def generate_script(story_id: str, db: AsyncSession, api_key: str = "", ba
                 model=resolved_model,
                 messages=[{"role": "user", "content": prompt}],
                 stream=True,
+                stream_options={"include_usage": True},
             )
         except Exception as exc:
             resolved_base_url = base_url or "(default)"
@@ -230,9 +231,11 @@ async def generate_script(story_id: str, db: AsyncSession, api_key: str = "", ba
 
         chunks = []
         async for chunk in stream:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                chunks.append(delta)
+            choices = getattr(chunk, "choices", None) or []
+            if choices:
+                delta = getattr(choices[0].delta, "content", None)
+                if delta:
+                    chunks.append(delta)
             usage = getattr(chunk, "usage", None)
             if usage:
                 total_prompt += getattr(usage, "prompt_tokens", 0) or 0

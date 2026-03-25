@@ -30,12 +30,23 @@ class PipelineProgress(BaseModel):
 
 class PipelineStatusResponse(BaseModel):
     project_id: str
+    pipeline_id: Optional[str] = None
+    story_id: Optional[str] = None
     status: PipelineStatus
     progress: int
     current_step: str
     error: Optional[str] = None
     progress_detail: Optional[PipelineProgress] = None
     generated_files: Optional[dict] = None
+    note: Optional[str] = None
+
+
+class PipelineActionResponse(BaseModel):
+    project_id: str
+    pipeline_id: str
+    story_id: Optional[str] = None
+    message: str
+    state: Optional[PipelineStatusResponse] = None
 
 
 class StoryboardRequest(BaseModel):
@@ -88,8 +99,11 @@ class ShotResult(BaseModel):
 class AutoGenerateResponse(BaseModel):
     """一键生成响应"""
     project_id: str
+    pipeline_id: str
+    story_id: Optional[str] = None
     message: str
     strategy: GenerationStrategy
+    note: Optional[str] = None
 
 
 class ConcatRequest(BaseModel):
@@ -100,3 +114,5 @@ class ConcatRequest(BaseModel):
 class ConcatResponse(BaseModel):
     """视频拼接响应"""
     video_url: str
+    pipeline_id: Optional[str] = None
+    story_id: Optional[str] = None

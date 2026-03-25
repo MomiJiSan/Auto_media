@@ -32,13 +32,6 @@ def _is_ark(base_url: str) -> bool:
     return "volces.com" in base_url or "volcengine" in base_url
 
 
-def _safe_response_json(resp: httpx.Response):
-    try:
-        return resp.json()
-    except Exception:
-        return None
-
-
 def _versioned_media_name(stem: str, suffix: str) -> str:
     token = hashlib.md5(f"{stem}:{time.time_ns()}".encode()).hexdigest()[:8]
     safe_stem = re.sub(r"[^A-Za-z0-9_-]", "_", stem)
@@ -94,27 +87,23 @@ async def generate_image(
         resp = await _submit(payload)
         print(f"[IMAGE] status={resp.status_code} key={mask_key(image_api_key)} base={base_url}")
         if not resp.is_success and negative_prompt and resp.status_code in (400, 422):
-            response_json = _safe_response_json(resp)
             logger.warning(
-                "Image provider rejected negative_prompt for shot %s, retrying without it. status=%s negative_prompt=%r key=%s body=%s json=%r",
+                "Image provider rejected negative_prompt; retrying without it. shot_id=%s status=%s key=%s provider_rejection=1 response_bytes=%s",
                 shot_id,
                 resp.status_code,
-                negative_prompt,
                 mask_key(image_api_key),
-                resp.text,
-                response_json,
+                len(resp.content or b""),
             )
             retry_payload = dict(payload)
             retry_payload.pop("negative_prompt", None)
             resp = await _submit(retry_payload)
             print(f"[IMAGE][RETRY_NO_NEGATIVE] status={resp.status_code} key={mask_key(image_api_key)} base={base_url}")
             logger.warning(
-                "Image provider retry without negative_prompt finished for shot %s. status=%s key=%s body=%s json=%r",
+                "Image provider retry without negative_prompt finished. shot_id=%s status=%s key=%s provider_rejection=1 response_bytes=%s",
                 shot_id,
                 resp.status_code,
                 mask_key(image_api_key),
-                resp.text,
-                _safe_response_json(resp),
+                len(resp.content or b""),
             )
         if not resp.is_success:
             raise RuntimeError(f"图片生成 API 错误 {resp.status_code}: {resp.text[:200]}")

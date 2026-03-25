@@ -5,13 +5,15 @@
 """
 from typing import Optional
 
+from app.core.story_assets import get_character_visual_dna
+
 
 # ============================================================================
 # 角色设计图 prompt 构建
 # ============================================================================
 
 def build_character_prompt(name: str, role: str, description: str) -> str:
-    """构建角色设计图生成 prompt（含 role 自动映射）。"""
+    """构建角色设计图生成 prompt（偏全身人设图 / 角色设定图，而不是头像）。"""
     role = role or ""
     description = description or ""
     role_lower = role.lower()
@@ -24,11 +26,11 @@ def build_character_prompt(name: str, role: str, description: str) -> str:
     else:
         role_cue = f"{role}"
     return (
-        f"Character portrait of {name}, {role_cue}, "
+        f"Full-body character design sheet for {name}, {role_cue}, "
         f"character description: {description}, "
-        "unique individual character design, distinctive appearance, "
-        "cinematic portrait, highly detailed, professional character concept art, "
-        "clean background, studio lighting, 8k resolution, photorealistic"
+        "show the complete outfit from head to toe, clear silhouette, distinctive physical traits, "
+        "front-facing hero pose, clean neutral backdrop, professional character concept art, "
+        "costume details, fabric texture, accessories, production-ready character sheet, highly detailed, photorealistic"
     )
 
 
@@ -51,9 +53,7 @@ def build_character_section(character_info: Optional[dict]) -> str:
         role = c.get("role", "")
         desc = c.get("description", "")
         lines.append(f"- **{name}**（{role}）：{desc}")
-        visual_dna = ""
-        if isinstance(character_images, dict):
-            visual_dna = character_images.get(name, {}).get("visual_dna", "")
+        visual_dna = get_character_visual_dna(character_images, name)
         if visual_dna:
             lines.append(f"  Visual DNA: {visual_dna}")
     return "\n".join(lines)

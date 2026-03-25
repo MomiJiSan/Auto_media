@@ -46,5 +46,7 @@ class Usage(BaseModel):
 
 
 class Storyboard(BaseModel):
+    pipeline_id: Optional[str] = Field(default=None, description="关联的手动流水线 ID")
+    story_id: Optional[str] = Field(default=None, description="关联的稳定 story_id")
     shots: List[Shot]
     usage: Optional[Usage] = Field(default=None, description="Token usage information")

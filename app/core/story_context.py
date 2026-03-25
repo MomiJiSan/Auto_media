@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from app.core.api_keys import inject_art_style
+from app.core.story_assets import get_character_visual_dna
 
 
 _CLOTHING_HINTS = (
@@ -37,6 +38,134 @@ _WARDROBE_CHANGE_HINTS = (
     "换上",
     "脱下",
     "更衣",
+)
+_PHYSICAL_HINTS = (
+    "year-old",
+    "young",
+    "middle-aged",
+    "elderly",
+    "male",
+    "female",
+    "man",
+    "woman",
+    "boy",
+    "girl",
+    "hair",
+    "haired",
+    "eyes",
+    "skin",
+    "build",
+    "slim",
+    "slender",
+    "lean",
+    "athletic",
+    "broad",
+    "tall",
+    "short",
+    "scar",
+    "freckles",
+    "beard",
+    "mustache",
+    "moustache",
+    "wrinkle",
+    "robe",
+    "coat",
+    "shirt",
+    "dress",
+    "armor",
+    "uniform",
+    "hanfu",
+    "kimono",
+    "jacket",
+    "cloak",
+    "boots",
+    "25岁",
+    "40岁",
+    "青年",
+    "中年",
+    "老人",
+    "男子",
+    "女性",
+    "男人",
+    "女人",
+    "男孩",
+    "女孩",
+    "头发",
+    "短发",
+    "长发",
+    "黑发",
+    "白发",
+    "银发",
+    "眼",
+    "瞳",
+    "肤",
+    "身形",
+    "体型",
+    "清瘦",
+    "高瘦",
+    "健壮",
+    "发福",
+    "胡",
+    "疤",
+    "袍",
+    "衫",
+    "裙",
+    "甲",
+    "服",
+    "靴",
+)
+_NON_PHYSICAL_HINTS = (
+    "kind",
+    "brave",
+    "loyal",
+    "smart",
+    "clever",
+    "talented",
+    "genius",
+    "lonely",
+    "gentle",
+    "cold",
+    "cruel",
+    "ruthless",
+    "ambitious",
+    "determined",
+    "mysterious",
+    "friendly",
+    "supportive",
+    "personality",
+    "backstory",
+    "ability",
+    "power",
+    "secret",
+    "truth",
+    "destiny",
+    "孤僻",
+    "善良",
+    "勇敢",
+    "忠诚",
+    "聪明",
+    "天才",
+    "冷酷",
+    "傲慢",
+    "温柔",
+    "野心",
+    "神秘",
+    "能力",
+    "秘密",
+    "真相",
+    "命运",
+    "出身",
+    "背景",
+    "性格",
+    "好友",
+    "反派",
+    "主角",
+    "支持",
+    "敌意",
+    "对抗",
+    "解开",
+    "卷入",
+    "追杀",
 )
 _GENRE_STYLE_RULES: dict[str, tuple[str, str, str]] = {
     "古风": (
@@ -90,6 +219,7 @@ class SceneStyle:
     image_extra: str = ""
     video_extra: str = ""
     negative_prompt: str = ""
+    always_apply: bool = False
 
 
 @dataclass
@@ -167,18 +297,61 @@ def _extract_description_fragment(text: str, hints: tuple[str, ...], word_limit:
     return ""
 
 
+def _looks_like_physical_detail(text: str) -> bool:
+    lowered = _collapse_spaces(text).lower()
+    if not lowered:
+        return False
+    return any(hint in lowered for hint in _PHYSICAL_HINTS)
+
+
+def _looks_like_non_physical_detail(text: str) -> bool:
+    lowered = _collapse_spaces(text).lower()
+    if not lowered:
+        return False
+    return any(hint in lowered for hint in _NON_PHYSICAL_HINTS)
+
+
+def _split_description_fragments(text: str) -> list[str]:
+    return [
+        fragment.strip()
+        for fragment in re.split(r"[。；;，,\n]", text or "")
+        if fragment and fragment.strip()
+    ]
+
+
+def sanitize_body_features(text: str, *, fallback_description: str = "") -> str:
+    normalized = _collapse_spaces(text)
+    fragments = _split_description_fragments(normalized)
+    kept = [
+        fragment
+        for fragment in fragments
+        if _looks_like_physical_detail(fragment) and not _looks_like_non_physical_detail(fragment)
+    ]
+    if not kept and fallback_description:
+        kept = [
+            fragment
+            for fragment in _split_description_fragments(fallback_description)
+            if _looks_like_physical_detail(fragment) and not _looks_like_non_physical_detail(fragment)
+        ]
+    if not kept and normalized and _looks_like_physical_detail(normalized) and not _looks_like_non_physical_detail(normalized):
+        kept = [normalized]
+    return _trim_words(", ".join(dict.fromkeys(kept)), 24)
+
+
+def sanitize_default_clothing(text: str, *, fallback_description: str = "") -> str:
+    normalized = _collapse_spaces(text)
+    if normalized and any(hint in normalized.lower() for hint in _CLOTHING_HINTS):
+        return _trim_words(normalized, 16)
+    guessed = _extract_description_fragment(fallback_description, _CLOTHING_HINTS, 16)
+    return _trim_words(guessed, 16)
+
+
 def _guess_body_features(description: str) -> str:
-    if not description:
-        return ""
-    fragments = re.split(r"[。；;]", description)
-    selected = [frag.strip() for frag in fragments if frag.strip()]
-    if not selected:
-        return ""
-    return _trim_words(selected[0], 25)
+    return sanitize_body_features("", fallback_description=description)
 
 
 def _guess_default_clothing(description: str) -> str:
-    return _extract_description_fragment(description, _CLOTHING_HINTS, 18)
+    return sanitize_default_clothing("", fallback_description=description)
 
 
 def _build_scene_styles(story: Mapping[str, Any]) -> list[SceneStyle]:
@@ -196,6 +369,7 @@ def _build_scene_styles(story: Mapping[str, Any]) -> list[SceneStyle]:
                         image_extra=image_extra,
                         video_extra=video_extra,
                         negative_prompt=negative_prompt,
+                        always_apply=True,
                     )
                 )
                 break
@@ -217,6 +391,7 @@ def _build_scene_styles(story: Mapping[str, Any]) -> list[SceneStyle]:
                         image_extra=image_extra,
                         video_extra=video_extra,
                         negative_prompt=negative_prompt,
+                        always_apply=bool(entry.get("always_apply", False)),
                     )
                 )
 
@@ -260,15 +435,16 @@ def build_story_context(story: Mapping[str, Any]) -> StoryContext:
             continue
 
         cached_entry = cached_appearance.get(name) or {}
-        image_entry = character_images.get(name) or {}
         description = _collapse_spaces(str(character.get("description", "")))
 
         body = _collapse_spaces(str(cached_entry.get("body", ""))) if isinstance(cached_entry, dict) else ""
         clothing = _collapse_spaces(str(cached_entry.get("clothing", ""))) if isinstance(cached_entry, dict) else ""
         negative_prompt = _collapse_spaces(str(cached_entry.get("negative_prompt", ""))) if isinstance(cached_entry, dict) else ""
 
+        body = sanitize_body_features(body, fallback_description=description)
+        clothing = sanitize_default_clothing(clothing, fallback_description=description)
         if not body:
-            body = _collapse_spaces(str(image_entry.get("visual_dna", ""))) or _guess_body_features(description)
+            body = sanitize_body_features(get_character_visual_dna(character_images, name), fallback_description=description) or _guess_body_features(description)
         if not clothing:
             clothing = _guess_default_clothing(description)
 
@@ -398,33 +574,90 @@ def character_appears_in_shot(name: str, shot: ShotLike) -> bool:
 
 
 def should_inject_clothing_for(name: str, shot: ShotLike) -> bool:
-    haystack = _collapse_spaces(
-        " ".join(
-            [
-                str(_shot_field(shot, "storyboard_description", "")),
-                str(_shot_field(shot, "image_prompt", "")),
-                str(_shot_field(shot, "final_video_prompt", "")),
-                _get_visual_field(shot, "action_and_expression"),
-            ]
-        )
-    )
-    if not _safe_name_match(name, haystack):
+    if not character_appears_in_shot(name, shot):
         return False
-    lowered_haystack = haystack.lower()
-    return not any(hint in lowered_haystack for hint in _WARDROBE_CHANGE_HINTS)
+
+    segments = [
+        str(_shot_field(shot, "storyboard_description", "")),
+        str(_shot_field(shot, "image_prompt", "")),
+        str(_shot_field(shot, "final_video_prompt", "")),
+        _get_visual_field(shot, "action_and_expression"),
+    ]
+    escaped_name = re.escape(_collapse_spaces(name))
+    patterns = [
+        re.compile(r"\b" + escaped_name + r"\b", flags=re.IGNORECASE),
+        re.compile(escaped_name, flags=re.IGNORECASE),
+    ]
+    relevant_contexts: list[str] = []
+    for segment in segments:
+        normalized_segment = _collapse_spaces(str(segment))
+        if not normalized_segment or not _safe_name_match(name, normalized_segment):
+            continue
+        lowered_segment = normalized_segment.lower()
+        segment_contexts: list[str] = []
+        for pattern in patterns:
+            for match in pattern.finditer(normalized_segment):
+                start = max(0, match.start() - 80)
+                end = min(len(normalized_segment), match.end() + 80)
+                segment_contexts.append(lowered_segment[start:end])
+            if segment_contexts:
+                break
+        relevant_contexts.extend(segment_contexts or [lowered_segment])
+    if not relevant_contexts:
+        return True
+    return not any(
+        hint in context
+        for hint in _WARDROBE_CHANGE_HINTS
+        for context in relevant_contexts
+    )
+
+
+def _join_natural_phrases(items: list[str], lang: str) -> str:
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        connector = "，同时" if lang == "zh" else ", alongside "
+        return f"{items[0]}{connector}{items[1]}"
+    if lang == "zh":
+        return "，".join(items[:-1]) + f"，以及{items[-1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+
+def _format_character_anchor(name: str, lock: CharacterLock, *, lang: str, include_clothing: bool) -> str:
+    body = sanitize_body_features(lock.body_features)
+    clothing = sanitize_default_clothing(lock.default_clothing)
+    if lang == "zh":
+        if body and include_clothing and clothing:
+            return f"{name}保持{body}，穿着{clothing}"
+        if body:
+            return f"{name}保持{body}"
+        if include_clothing and clothing:
+            return f"{name}穿着{clothing}"
+        return ""
+    if body and include_clothing and clothing:
+        return f"{name} with {body}, wearing {clothing}"
+    if body:
+        return f"{name} with {body}"
+    if include_clothing and clothing:
+        return f"{name} wearing {clothing}"
+    return ""
 
 
 def _appearance_prefix(shot: ShotLike, ctx: StoryContext, include_clothing: bool = True) -> str:
-    appearance_lines = []
+    appearance_lines: list[str] = []
     for name, lock in ctx.character_locks.items():
         if not character_appears_in_shot(name, shot):
             continue
-        bits = [lock.body_features]
-        if include_clothing and should_inject_clothing_for(name, shot) and lock.default_clothing:
-            bits.append(lock.default_clothing)
-        merged = ", ".join(bit for bit in bits if bit)
+        merged = _format_character_anchor(
+            name,
+            lock,
+            lang="zh" if _contains_cjk(" ".join([str(_shot_field(shot, "image_prompt", "")), str(_shot_field(shot, "final_video_prompt", "")), str(_shot_field(shot, "last_frame_prompt", ""))])) else "en",
+            include_clothing=include_clothing and should_inject_clothing_for(name, shot),
+        )
         if merged:
-            appearance_lines.append(f"{name}: {merged}")
+            appearance_lines.append(merged)
 
     if not appearance_lines:
         return ""
@@ -437,9 +670,9 @@ def _appearance_prefix(shot: ShotLike, ctx: StoryContext, include_clothing: bool
         ]
     )
     lang = "zh" if _contains_cjk(base_prompt) else "en"
-    prefix = "角色锚点：" if lang == "zh" else "Character anchor: "
+    prefix = "保持角色外观一致：" if lang == "zh" else "Maintain consistent appearance: "
     suffix = "。" if lang == "zh" else "."
-    return f"{prefix}{'; '.join(appearance_lines)}{suffix}"
+    return f"{prefix}{_join_natural_phrases(appearance_lines, lang)}{suffix}"
 
 
 def _scene_style_extra(ctx: StoryContext, shot: ShotLike, mode: str) -> str:
@@ -458,7 +691,7 @@ def _scene_style_extra(ctx: StoryContext, shot: ShotLike, mode: str) -> str:
         style_extra = style.image_extra if mode != "video" else (style.video_extra or style.image_extra)
         if not style_extra:
             continue
-        if not style.keywords or any(keyword.lower() in text for keyword in style.keywords):
+        if style.always_apply or not style.keywords or any(keyword.lower() in text for keyword in style.keywords):
             matched.append(style_extra)
     if not matched and len(ctx.scene_styles) == 1:
         fallback_style = ctx.scene_styles[0]

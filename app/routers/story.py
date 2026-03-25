@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
+from app.core.story_assets import get_character_design_prompt, get_character_visual_dna
 from app.schemas.story import AnalyzeIdeaRequest, GenerateOutlineRequest, GenerateScriptRequest, ChatRequest, RefineRequest, WorldBuildingStartRequest, WorldBuildingTurnRequest, PatchStoryRequest, ApplyChatRequest
 from app.services.story_llm import analyze_idea, generate_outline, generate_script, chat, refine, world_building_start, world_building_turn, apply_chat
 from app.services import story_repository as repo
@@ -86,6 +87,7 @@ async def api_generate_script(req: GenerateScriptRequest, request: Request, llm:
 
     async def event_stream():
         scenes = []
+        success = False
         try:
             async for scene in generate_script(req.story_id, db=db, **script_llm):
                 if "__usage__" not in scene:
@@ -93,6 +95,7 @@ async def api_generate_script(req: GenerateScriptRequest, request: Request, llm:
                     yield f"data: {json.dumps(scene, ensure_ascii=False)}\n\n"
                 else:
                     yield f"data: {json.dumps(scene, ensure_ascii=False)}\n\n"
+            success = True
         except Exception as e:
             logger.exception(
                 "Generate script failed story_id=%s provider=%s model=%s",
@@ -101,8 +104,9 @@ async def api_generate_script(req: GenerateScriptRequest, request: Request, llm:
                 script_llm.get("model", ""),
             )
             yield f"data: [ERROR] {str(e)}\n\n"
-        await repo.save_story(db, req.story_id, {"scenes": scenes})
-        yield "data: [DONE]\n\n"
+        if success:
+            await repo.save_story(db, req.story_id, {"scenes": scenes})
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -174,9 +178,12 @@ async def finalize_script(story_id: str, db: AsyncSession = Depends(get_db)):
             role = c.get("role", "")
             desc = c.get("description", "")
             lines.append(f"- {name}（{role}）：{desc}")
-            portrait = character_images.get(name, {}).get("portrait_prompt", "") if isinstance(character_images, dict) else ""
-            if portrait:
-                lines.append(f"  外观提示词: {portrait}")
+            visual_dna = get_character_visual_dna(character_images, name)
+            design_prompt = get_character_design_prompt(character_images, name)
+            if visual_dna:
+                lines.append(f"  Visual DNA: {visual_dna}")
+            if design_prompt:
+                lines.append(f"  角色设定图提示词: {design_prompt}")
         lines.append("")
 
     for ep in scenes:

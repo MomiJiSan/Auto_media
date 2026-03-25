@@ -41,7 +41,7 @@ def _build_basic_payload(shot: dict, art_style: str) -> dict:
     }
     negative_prompt = str(shot.get("negative_prompt", "")).strip()
     if negative_prompt:
-        payload["negative_prompt"] = inject_art_style(negative_prompt, art_style)
+        payload["negative_prompt"] = negative_prompt
     last_frame_prompt = str(shot.get("last_frame_prompt", "")).strip()
     if last_frame_prompt:
         payload["last_frame_prompt"] = inject_art_style(last_frame_prompt, art_style)

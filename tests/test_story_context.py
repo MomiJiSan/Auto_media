@@ -4,10 +4,12 @@ from unittest.mock import patch
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.database import Base
-from app.core.story_context import build_generation_payload, build_story_context, character_appears_in_shot
+from app.core.story_assets import build_character_asset_record, get_character_design_prompt, get_character_visual_dna
+from app.core.story_context import _GENRE_STYLE_RULES, build_generation_payload, build_story_context, character_appears_in_shot
 from app.models.story import Story
 from app.schemas.storyboard import AudioReference, CameraSetup, Shot, VisualElements
 from app.services import story_repository as repo
+from app.routers.image import _build_basic_payload
 from app.services.story_context_service import prepare_story_context, _parse_json
 from app.services.storyboard import parse_script_to_storyboard
 
@@ -62,7 +64,7 @@ class StoryContextTests(unittest.TestCase):
 
         self.assertIn("Visual DNA", ctx.clean_character_section)
         self.assertNotIn("studio lighting", ctx.clean_character_section.lower())
-        self.assertIn("Character anchor:", payload["image_prompt"])
+        self.assertIn("Maintain consistent appearance:", payload["image_prompt"])
         self.assertIn("Li Ming pushes the wooden door inward", payload["final_video_prompt"])
         self.assertIn("cinematic watercolor", payload["image_prompt"])
         self.assertIn("cinematic watercolor", payload["final_video_prompt"])
@@ -71,6 +73,57 @@ class StoryContextTests(unittest.TestCase):
         self.assertNotIn("江南水乡", payload["final_video_prompt"])
         self.assertIn("last_frame_prompt", payload)
         self.assertNotEqual(payload["image_prompt"], payload["final_video_prompt"])
+        self.assertNotIn("Character anchor:", payload["image_prompt"])
+
+    def test_sanitize_non_physical_character_cache_before_injection(self):
+        story = {
+            "characters": [
+                {
+                    "name": "艾文",
+                    "role": "主角",
+                    "description": "年轻男性，黑色短发，身形清瘦，穿着深蓝长袍。性格孤僻但内心善良，拥有解开时间循环秘密的能力。",
+                }
+            ],
+            "meta": {
+                "character_appearance_cache": {
+                    "艾文": {
+                        "body": "年轻男性，天才魔法师，孤僻善良，解开时间循环秘密",
+                        "clothing": "深蓝长袍",
+                    }
+                }
+            },
+        }
+        shot = {
+            "storyboard_description": "艾文站在走廊尽头。",
+            "image_prompt": "Medium shot. Aiwen stands at the corridor end.",
+            "final_video_prompt": "Medium shot. Static camera. Aiwen raises his head slowly.",
+        }
+
+        ctx = build_story_context(story)
+        payload = build_generation_payload(shot, ctx)
+
+        self.assertIn("深蓝长袍", ctx.clean_character_section)
+        self.assertNotIn("天才魔法师", payload["image_prompt"])
+        self.assertNotIn("解开时间循环秘密", payload["final_video_prompt"])
+
+    def test_multi_character_anchor_uses_natural_phrase(self):
+        story = {
+            "characters": [
+                {"name": "Li Ming", "role": "lead", "description": "25-year-old man, short black hair, slim build, wearing a dark blue robe."},
+                {"name": "Boss Zhao", "role": "support", "description": "40-year-old heavyset man, moustache, wearing a brown brocade robe."},
+            ]
+        }
+        shot = {
+            "storyboard_description": "Li Ming stands at the counter while Boss Zhao sits behind the account desk.",
+            "image_prompt": "Medium shot. Li Ming stands at the counter while Boss Zhao sits behind the desk.",
+            "final_video_prompt": "Medium shot. Static camera. Li Ming lowers his gaze while Boss Zhao leans forward.",
+        }
+
+        payload = build_generation_payload(shot, build_story_context(story))
+
+        self.assertIn("Maintain consistent appearance:", payload["image_prompt"])
+        self.assertIn("alongside", payload["image_prompt"])
+        self.assertNotIn("Character anchor:", payload["image_prompt"])
 
     def test_character_matching_avoids_substring_false_positive(self):
         story = {
@@ -104,6 +157,51 @@ class StoryContextTests(unittest.TestCase):
         }
         self.assertTrue(character_appears_in_shot("Li Ming", shot))
         self.assertFalse(character_appears_in_shot("Li", shot))
+
+    def test_genre_fallback_style_still_applies_when_scene_cache_keywords_do_not_match(self):
+        story = {
+            "genre": "鍙ら",
+            "meta": {
+                "scene_style_cache": [
+                    {
+                        "keywords": ["teahouse"],
+                        "image_extra": "jiangnan teahouse interior",
+                        "video_extra": "jiangnan teahouse interior",
+                    }
+                ]
+            },
+        }
+        story["genre"] = next(iter(_GENRE_STYLE_RULES))
+        shot = {
+            "storyboard_description": "Moonlight falls across an empty stone bridge.",
+            "image_prompt": "Wide shot. Moonlight washes over an ancient stone bridge.",
+            "final_video_prompt": "Wide shot. Static camera. Mist drifts above the stone bridge.",
+        }
+
+        payload = build_generation_payload(shot, build_story_context(story))
+
+        self.assertIn(next(iter(_GENRE_STYLE_RULES.values()))[0], payload["image_prompt"])
+        self.assertNotIn("jiangnan teahouse interior", payload["image_prompt"])
+
+    def test_clothing_change_hint_only_applies_to_segments_mentioning_same_character(self):
+        story = {
+            "characters": [
+                {"name": "Li Ming", "role": "lead", "description": "young man, short black hair. wearing a dark blue robe."},
+                {"name": "Boss Zhao", "role": "support", "description": "middle-aged man, moustache, wearing a brown robe."},
+            ]
+        }
+        shot = {
+            "storyboard_description": "Li Ming stands at the counter while Boss Zhao watches from the back room.",
+            "image_prompt": "Medium shot. Li Ming waits at the counter.",
+            "final_video_prompt": "Medium shot. Static camera. Li Ming looks toward the ledger desk.",
+            "visual_elements": {
+                "action_and_expression": "Boss Zhao changes outfit in the back room before returning.",
+            },
+        }
+
+        payload = build_generation_payload(shot, build_story_context(story))
+
+        self.assertIn("wearing a dark blue robe", payload["image_prompt"])
 
 
 class ParseStoryboardOverrideTests(unittest.IsolatedAsyncioTestCase):
@@ -232,10 +330,7 @@ class StoryContextPreparationTests(unittest.IsolatedAsyncioTestCase):
                 story["meta"]["character_appearance_cache"]["李明"]["body"],
                 "young man, short black hair, slim build",
             )
-            self.assertEqual(
-                story["character_images"]["李明"]["visual_dna"],
-                "young man, short black hair, slim build",
-            )
+            self.assertEqual(story.get("character_images", {}), {})
             self.assertEqual(
                 story["meta"]["scene_style_cache"][0]["video_extra"],
                 "jiangnan river town, rain mist, warm lantern glow",
@@ -249,6 +344,108 @@ class StoryContextPreparationTests(unittest.IsolatedAsyncioTestCase):
             payload = build_generation_payload(shot, ctx)
             self.assertIn("jiangnan river town", payload["image_prompt"])
             self.assertIn("modern clothing", payload["negative_prompt"])
+
+    async def test_prepare_story_context_projects_visual_dna_only_when_asset_exists(self):
+        async with self.session_factory() as session:
+            await repo.save_story(
+                session,
+                "story-ctx-project-dna",
+                {
+                    "idea": "test",
+                    "genre": "历史",
+                    "tone": "沉稳",
+                    "selected_setting": "江南古镇，临河茶馆。",
+                    "characters": [
+                        {
+                            "name": "李明",
+                            "role": "主角",
+                            "description": "25岁青年男子，黑色短发，身形清瘦，穿着深蓝长衫。",
+                        }
+                    ],
+                    "character_images": {
+                        "李明": build_character_asset_record(
+                            image_url="/media/characters/li_ming.png",
+                            image_path="media/characters/li_ming.png",
+                            prompt="Full-body character design sheet for 李明",
+                        )
+                    },
+                    "meta": {},
+                },
+            )
+
+            class FakeProvider:
+                async def complete_messages_with_usage(self, messages, system: str = "", temperature: float = 0.3, **kwargs):
+                    if "stable visual anchors" in system:
+                        return (
+                            '{"characters":{"李明":{"body":"young man, short black hair, slim build","clothing":"dark blue robe"}}}',
+                            {"prompt_tokens": 12, "completion_tokens": 5},
+                        )
+                    return (
+                        '{"styles":[{"keywords":["teahouse"],"image_extra":"jiangnan teahouse","video_extra":"jiangnan teahouse"}]}',
+                        {"prompt_tokens": 8, "completion_tokens": 4},
+                    )
+
+            with patch("app.services.story_context_service.get_llm_provider", return_value=FakeProvider()):
+                story, _ = await prepare_story_context(
+                    session,
+                    "story-ctx-project-dna",
+                    provider="openai",
+                    model="gpt-4o-mini",
+                    api_key="test-key",
+                    base_url="https://example.com/v1",
+                )
+
+            self.assertEqual(
+                story["character_images"]["李明"]["visual_dna"],
+                "young man, short black hair, slim build",
+            )
+
+    async def test_prepare_story_context_uses_env_backfill_credentials(self):
+        async with self.session_factory() as session:
+            await repo.save_story(
+                session,
+                "story-ctx-env-fallback",
+                {
+                    "idea": "test",
+                    "genre": "历史",
+                    "tone": "沉稳",
+                    "selected_setting": "江南古镇，石桥，细雨。",
+                    "characters": [
+                        {
+                            "name": "李明",
+                            "role": "主角",
+                            "description": "25岁青年男子，黑色短发，穿着深蓝长衫。",
+                        }
+                    ],
+                    "meta": {},
+                },
+            )
+
+            class FakeProvider:
+                async def complete_messages_with_usage(self, messages, system: str = "", temperature: float = 0.3, **kwargs):
+                    if "stable visual anchors" in system:
+                        return (
+                            '{"characters":{"李明":{"body":"young man, short black hair","clothing":"dark blue robe"}}}',
+                            {"prompt_tokens": 10, "completion_tokens": 5},
+                        )
+                    return (
+                        '{"styles":[{"keywords":["bridge"],"image_extra":"ancient bridge, rain mist","video_extra":"ancient bridge, rain mist"}]}',
+                        {"prompt_tokens": 8, "completion_tokens": 4},
+                    )
+
+            with patch("app.services.story_context_service.get_llm_provider", return_value=FakeProvider()):
+                with patch("app.services.story_context_service.settings.anthropic_api_key", "env-key"):
+                    story, _ = await prepare_story_context(
+                        session,
+                        "story-ctx-env-fallback",
+                        provider="claude",
+                        model="claude-sonnet-4-6",
+                        api_key="",
+                        base_url="",
+                    )
+
+            self.assertIn("character_appearance_cache", story["meta"])
+            self.assertIn("scene_style_cache", story["meta"])
 
 
 class StoryContextServiceParsingTests(unittest.TestCase):
@@ -266,6 +463,34 @@ class StoryContextServiceParsingTests(unittest.TestCase):
         parsed = _parse_json(content)
 
         self.assertEqual(parsed["characters"]["Li Ming"]["body"], "short black hair")
+
+
+class StoryAssetHelperTests(unittest.TestCase):
+    def test_character_asset_record_preserves_compatibility_fields(self):
+        record = build_character_asset_record(
+            image_url="/media/characters/li_ming.png",
+            image_path="media/characters/li_ming.png",
+            prompt="Full-body character design sheet for Li Ming",
+            existing={"visual_dna": "young man, short black hair"},
+        )
+
+        self.assertEqual(record["prompt"], "Full-body character design sheet for Li Ming")
+        self.assertEqual(record["design_prompt"], "Full-body character design sheet for Li Ming")
+        self.assertEqual(record["asset_kind"], "character_sheet")
+        self.assertEqual(record["framing"], "full_body")
+        self.assertEqual(record["visual_dna"], "young man, short black hair")
+
+    def test_character_asset_getters_prefer_new_fields_and_keep_visual_dna(self):
+        character_images = {
+            "Li Ming": {
+                "prompt": "legacy prompt",
+                "design_prompt": "new design prompt",
+                "visual_dna": "young man, short black hair",
+            }
+        }
+
+        self.assertEqual(get_character_design_prompt(character_images, "Li Ming"), "new design prompt")
+        self.assertEqual(get_character_visual_dna(character_images, "Li Ming"), "young man, short black hair")
 
 
 class StoryRepositoryHelperTests(unittest.IsolatedAsyncioTestCase):
@@ -300,6 +525,21 @@ class StoryRepositoryHelperTests(unittest.IsolatedAsyncioTestCase):
             updated_story = await repo.get_story(session, "story-cache-test")
             self.assertEqual(updated_story["meta"]["theme"], "雨夜古镇")
             self.assertNotIn("character_appearance_cache", updated_story["meta"])
+
+
+class ImageRouterFallbackTests(unittest.TestCase):
+    def test_basic_payload_keeps_negative_prompt_separate_from_art_style(self):
+        payload = _build_basic_payload(
+            {
+                "shot_id": "scene1_shot1",
+                "image_prompt": "Medium shot. A hero stands in the rain.",
+                "negative_prompt": "blur, low quality",
+            },
+            "cinematic watercolor",
+        )
+
+        self.assertEqual(payload["negative_prompt"], "blur, low quality")
+        self.assertIn("cinematic watercolor", payload["image_prompt"])
 
 
 if __name__ == "__main__":

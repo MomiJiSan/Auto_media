@@ -1,47 +1,130 @@
 import logging
+from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Body, Depends, Request
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.core.database import get_db, AsyncSessionLocal
+
+from app.core.api_keys import (
+    extract_api_keys,
+    get_art_style,
+    image_config_dep,
+    llm_config_dep,
+    resolve_image_key,
+    resolve_llm_config,
+    validate_user_base_url,
+    video_config_dep,
+)
 from app.core.config import settings as _cfg
-from app.core.api_keys import extract_api_keys, resolve_image_key, image_config_dep, video_config_dep, llm_config_dep, validate_user_base_url, resolve_llm_config, get_art_style
+from app.core.database import AsyncSessionLocal, get_db
+from app.core.pipeline_runtime import get_runtime_strategy_note, resolve_tracking_story_id
+from app.core.story_context import build_generation_payload
 from app.schemas.pipeline import (
-    PipelineStatusResponse,
-    PipelineStatus,
     AutoGenerateRequest,
     AutoGenerateResponse,
-    GenerationStrategy,
-    StoryboardRequest,
     ConcatRequest,
     ConcatResponse,
+    GenerationStrategy,
+    PipelineActionResponse,
+    PipelineStatus,
+    PipelineStatusResponse,
+    StoryboardRequest,
 )
 from app.schemas.storyboard import Storyboard
-from app.services.storyboard import parse_script_to_storyboard
-from app.services.pipeline_executor import PipelineExecutor
 from app.services import story_repository as repo
-from app.core.story_context import build_generation_payload
+from app.services.pipeline_executor import PipelineExecutor
 from app.services.story_context_service import prepare_story_context
-from uuid import uuid4
+from app.services.storyboard import parse_script_to_storyboard
 
 router = APIRouter(prefix="/api/v1/pipeline", tags=["pipeline"])
 logger = logging.getLogger(__name__)
 
-# 手动步进模式使用的内存状态（每个 project 一个）
-_pipeline_states: dict[str, dict] = {}
+_DEFAULT_STEP = "Waiting to start"
+
+def _default_pipeline_record(*, project_id: str, story_id: str | None = None) -> dict:
+    return {
+        "id": None,
+        "story_id": story_id or project_id,
+        "status": PipelineStatus.PENDING,
+        "progress": 0,
+        "current_step": _DEFAULT_STEP,
+        "error": None,
+        "progress_detail": None,
+        "generated_files": None,
+    }
 
 
-def _get_or_create(project_id: str) -> dict:
-    """获取或初始化手动步进模式的内存状态。"""
-    if project_id not in _pipeline_states:
-        _pipeline_states[project_id] = {
-            "status": PipelineStatus.PENDING,
-            "progress": 0,
-            "current_step": "等待开始",
-            "error": None,
-            "progress_detail": None,
-            "generated_files": None,
-        }
-    return _pipeline_states[project_id]
+def _normalize_optional_id(value: str | None) -> str | None:
+    if value is None or not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+async def _load_pipeline_record(
+    db: AsyncSession,
+    *,
+    project_id: str,
+    pipeline_id: str,
+    story_id: str,
+) -> dict:
+    record = await repo.get_pipeline(db, pipeline_id)
+    if not record:
+        record = _default_pipeline_record(project_id=project_id, story_id=story_id)
+    record["id"] = pipeline_id
+    record["story_id"] = story_id
+    return record
+
+
+def _build_pipeline_status_response(project_id: str, pipeline: dict) -> PipelineStatusResponse:
+    generated_files = pipeline.get("generated_files")
+    note = None
+    if isinstance(generated_files, dict):
+        meta = generated_files.get("meta")
+        if isinstance(meta, dict):
+            note = meta.get("note")
+
+    return PipelineStatusResponse(
+        project_id=project_id,
+        pipeline_id=pipeline.get("id"),
+        story_id=pipeline.get("story_id"),
+        status=pipeline.get("status", PipelineStatus.PENDING),
+        progress=pipeline.get("progress", 0),
+        current_step=pipeline.get("current_step", _DEFAULT_STEP),
+        error=pipeline.get("error"),
+        progress_detail=pipeline.get("progress_detail"),
+        generated_files=generated_files,
+        note=note,
+    )
+
+
+async def _persist_manual_pipeline_state(
+    db: AsyncSession,
+    *,
+    project_id: str,
+    pipeline_id: str,
+    story_id: str,
+    updates: dict,
+    merge_generated_files: bool = False,
+) -> dict:
+    pipeline = await _load_pipeline_record(
+        db,
+        project_id=project_id,
+        pipeline_id=pipeline_id,
+        story_id=story_id,
+    )
+
+    if merge_generated_files:
+        existing_generated_files = pipeline.get("generated_files")
+        new_generated_files = updates.get("generated_files")
+        if isinstance(existing_generated_files, dict) and isinstance(new_generated_files, dict):
+            merged_generated_files = dict(existing_generated_files)
+            merged_generated_files.update(new_generated_files)
+            updates = {**updates, "generated_files": merged_generated_files}
+
+    pipeline.update(updates)
+
+    await repo.save_pipeline(db, pipeline_id, story_id, pipeline)
+    return pipeline
 
 
 async def _load_story_context(
@@ -71,25 +154,24 @@ async def auto_generate(
     background_tasks: BackgroundTasks,
     request: Request,
 ):
-    """
-    一键生成完整视频 - 自动执行全流程
-
-    支持三种策略：
-    - separated: TTS → 图片 → 图生视频 → FFmpeg 合成
-    - integrated: 图片 → 视频语音一体生成
-    - chained: 分离式 + 场景内链式帧传递，同一场景内串行生成以保持镜头间视觉一致性
-    """
-    # 创建新的 pipeline 记录
     pipeline_id = str(uuid4())
+    tracking_story_id = resolve_tracking_story_id(project_id, req.story_id)
+    runtime_note = get_runtime_strategy_note(req.strategy) or None
 
-    # 在请求上下文中提取 API Key（header 优先，回退到请求体字段）
     keys = extract_api_keys(request)
-    llm_api_key  = keys.llm_api_key  or req.llm_api_key  or ""
-    llm_base_url = keys.llm_base_url or req.llm_base_url or ""
+    resolved_llm = resolve_llm_config(
+        keys.llm_api_key or req.llm_api_key or "",
+        keys.llm_base_url or req.llm_base_url or "",
+        keys.llm_provider or req.provider or "",
+        keys.llm_model or req.model or "",
+    )
     image_api_key = resolve_image_key(keys.image_api_key or req.image_api_key or "")
     validated_image_base_url = validate_user_base_url(keys.image_base_url)
     if validated_image_base_url and not keys.image_api_key:
-        raise HTTPException(status_code=400, detail="使用自定义 X-Image-Base-URL 时必须同时提供 X-Image-API-Key")
+        raise HTTPException(
+            status_code=400,
+            detail="Custom X-Image-Base-URL requires X-Image-API-Key.",
+        )
     image_base_url = validated_image_base_url or _cfg.siliconflow_base_url
 
     video_cfg = video_config_dep(request)
@@ -98,25 +180,26 @@ async def auto_generate(
     video_provider = video_cfg["video_provider"]
     art_style = req.art_style or get_art_style(request)
 
-    async def _run_pipeline():
-        """后台执行流水线"""
-        # 创建新的数据库会话用于后台任务
+    async def _run_pipeline() -> None:
         async with AsyncSessionLocal() as db_session:
-            # 初始化 pipeline 状态
-            await repo.save_pipeline(db_session, pipeline_id, project_id, {
-                "status": PipelineStatus.PENDING,
-                "progress": 0,
-                "current_step": "准备开始",
-                "error": None,
-                "progress_detail": None,
-                "generated_files": None,
-            })
+            await repo.save_pipeline(
+                db_session,
+                pipeline_id,
+                tracking_story_id,
+                {
+                    "status": PipelineStatus.PENDING,
+                    "progress": 0,
+                    "current_step": "Preparing pipeline",
+                    "error": None,
+                    "progress_detail": None,
+                    "generated_files": None,
+                },
+            )
 
-            # 获取角色信息（如果提供了 story_id）
             character_info = None
-            if req.story_id:
+            if tracking_story_id:
                 try:
-                    story = await repo.get_story(db_session, req.story_id)
+                    story = await repo.get_story(db_session, tracking_story_id)
                     if story:
                         characters = story.get("characters", [])
                         character_images = story.get("character_images", {})
@@ -126,20 +209,25 @@ async def auto_generate(
                                 "character_images": character_images or {},
                             }
                 except Exception:
-                    pass  # 降级：无角色信息但不报错
+                    logger.exception("Failed to load character info for story_id=%s", tracking_story_id)
 
-            executor = PipelineExecutor(project_id, pipeline_id, db_session)
+            executor = PipelineExecutor(
+                project_id,
+                pipeline_id,
+                db_session,
+                story_id=tracking_story_id,
+            )
             await executor.run_full_pipeline(
                 script=req.script,
                 strategy=req.strategy,
-                provider=req.provider,
-                model=req.model,
+                provider=resolved_llm["provider"] or req.provider,
+                model=resolved_llm["model"] or req.model,
                 voice=req.voice,
                 image_model=req.image_model,
                 video_model=req.video_model,
                 base_url=req.base_url,
-                llm_api_key=llm_api_key,
-                llm_base_url=llm_base_url,
+                llm_api_key=resolved_llm["api_key"],
+                llm_base_url=resolved_llm["base_url"],
                 image_api_key=image_api_key,
                 image_base_url=image_base_url,
                 video_api_key=video_api_key,
@@ -147,15 +235,18 @@ async def auto_generate(
                 video_provider=video_provider,
                 character_info=character_info,
                 art_style=art_style,
-                story_id=req.story_id,
+                story_id=tracking_story_id,
             )
 
     background_tasks.add_task(_run_pipeline)
 
     return AutoGenerateResponse(
         project_id=project_id,
-        message=f"自动化流水线已启动（策略：{req.strategy.value}）",
+        pipeline_id=pipeline_id,
+        story_id=tracking_story_id,
+        message=f"Pipeline started (strategy: {req.strategy.value})",
         strategy=req.strategy,
+        note=runtime_note,
     )
 
 
@@ -167,34 +258,37 @@ async def generate_storyboard(
     llm: dict = Depends(llm_config_dep),
     db: AsyncSession = Depends(get_db),
 ):
-    """手动触发：分镜解析"""
     pipeline_id = str(uuid4())
 
-    # 读取分镜专用配置（X-Script-* headers）
-    s_provider = request.headers.get("X-Script-Provider", "")
-    s_api_key  = request.headers.get("X-Script-API-Key",  "")
-    s_base_url = request.headers.get("X-Script-Base-URL", "")
-    s_model    = request.headers.get("X-Script-Model",    "")
+    script_provider = request.headers.get("X-Script-Provider", "")
+    script_api_key = request.headers.get("X-Script-API-Key", "")
+    script_base_url = request.headers.get("X-Script-Base-URL", "")
+    script_model = request.headers.get("X-Script-Model", "")
 
-    if s_provider or s_api_key or s_base_url or s_model:
-        script_llm = resolve_llm_config(s_api_key, s_base_url, s_provider, s_model)
+    if script_provider or script_api_key or script_base_url or script_model:
+        script_llm = resolve_llm_config(script_api_key, script_base_url, script_provider, script_model)
     else:
         script_llm = llm
 
     provider = script_llm["provider"] or req.provider or "claude"
+    tracking_story_id = resolve_tracking_story_id(project_id, req.story_id)
 
-    await repo.save_pipeline(db, pipeline_id, project_id, {
-        "status": PipelineStatus.STORYBOARD,
-        "progress": 10,
-        "current_step": "解析分镜中",
-    })
+    await repo.save_pipeline(
+        db,
+        pipeline_id,
+        tracking_story_id,
+        {
+            "status": PipelineStatus.STORYBOARD,
+            "progress": 10,
+            "current_step": "Parsing storyboard",
+        },
+    )
 
     try:
-        # 获取角色信息（如果提供了 story_id）
         character_info = None
         story, story_context = await _load_story_context(
             db,
-            req.story_id,
+            tracking_story_id,
             provider=provider,
             model=script_llm["model"] or req.model or "",
             api_key=script_llm["api_key"],
@@ -218,162 +312,295 @@ async def generate_storyboard(
             character_info=character_info,
             character_section_override=story_context.clean_character_section if story_context else None,
         )
-    except Exception as e:
+    except Exception as exc:
         logger.exception(
             "Storyboard generation failed project_id=%s story_id=%s provider=%s model=%s",
             project_id,
-            req.story_id,
+            tracking_story_id,
             provider,
             script_llm["model"] or req.model or "",
         )
-        await repo.save_pipeline(db, pipeline_id, project_id, {
-            "status": PipelineStatus.FAILED,
-            "error": str(e),
-        })
-        raise HTTPException(status_code=500, detail=f"分镜解析失败: {e}") from e
+        await repo.save_pipeline(
+            db,
+            pipeline_id,
+            tracking_story_id,
+            {
+                "status": PipelineStatus.FAILED,
+                "error": str(exc),
+            },
+        )
+        raise HTTPException(status_code=500, detail=f"Storyboard generation failed: {exc}") from exc
 
-    await repo.save_pipeline(db, pipeline_id, project_id, {
-        "progress": 30,
-        "current_step": "分镜解析完成",
-    })
+    await repo.save_pipeline(
+        db,
+        pipeline_id,
+        tracking_story_id,
+        {
+            "progress": 30,
+            "current_step": "Storyboard ready",
+        },
+    )
 
     return Storyboard(
+        pipeline_id=pipeline_id,
+        story_id=tracking_story_id,
         shots=shots,
         usage={
             "prompt_tokens": usage.get("prompt_tokens", 0),
             "completion_tokens": usage.get("completion_tokens", 0),
-        }
+        },
     )
 
-
-@router.post("/{project_id}/generate-assets")
+@router.post("/{project_id}/generate-assets", response_model=PipelineActionResponse)
 async def generate_assets(
     project_id: str,
     request: Request,
     storyboard: Storyboard,
     image_config: dict = Depends(image_config_dep),
     llm: dict = Depends(llm_config_dep),
-    voice: str = Query("zh-CN-XiaoxiaoNeural", description="TTS 语音"),
-    image_model: str = Query("black-forest-labs/FLUX.1-schnell", description="图片生成模型"),
-    story_id: str | None = Query(None, description="可选 story_id，用于应用一致性上下文"),
+    pipeline_id: str | None = Query(None, description="Optional manual pipeline id"),
+    generate_tts: bool = Query(True, description="Whether to generate TTS in this batch run"),
+    generate_images: bool = Query(True, description="Whether to generate images in this batch run"),
+    voice: str = Query("zh-CN-XiaoxiaoNeural", description="TTS voice"),
+    image_model: str = Query("black-forest-labs/FLUX.1-schnell", description="Image model"),
+    story_id: str | None = Query(None, description="Stable story id for StoryContext loading"),
     background_tasks: BackgroundTasks = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    手动触发：生成 TTS 和图片资产
+    from app.services import image, tts
 
-    参数：
-    - storyboard: 分镜数据（从 storyboard 接口获取）
-    - voice: TTS 语音（默认：晓晓）
-    - image_model: 图片生成模型（默认：FLUX.1-schnell）
-    """
-    from app.services import tts, image
+    if not generate_tts and not generate_images:
+        raise HTTPException(status_code=400, detail="At least one asset type must be enabled")
 
-    state = _get_or_create(project_id)
-    state.update(
-        status=PipelineStatus.GENERATING_ASSETS,
-        progress=30,
-        current_step="生成 TTS 和图片中",
+    tracking_story_id = resolve_tracking_story_id(
+        project_id,
+        _normalize_optional_id(story_id) or _normalize_optional_id(storyboard.story_id),
     )
-
+    resolved_pipeline_id = (
+        _normalize_optional_id(pipeline_id)
+        or _normalize_optional_id(storyboard.pipeline_id)
+        or str(uuid4())
+    )
     shots = storyboard.shots
     total = len(shots)
     art_style = get_art_style(request)
-    _, story_context = await _load_story_context(
+
+    initial_pipeline = await _persist_manual_pipeline_state(
         db,
-        story_id,
-        provider=llm["provider"],
-        model=llm["model"],
-        api_key=llm["api_key"],
-        base_url=llm["base_url"],
+        project_id=project_id,
+        pipeline_id=resolved_pipeline_id,
+        story_id=tracking_story_id,
+        updates={
+            "status": PipelineStatus.GENERATING_ASSETS,
+            "progress": 30,
+            "current_step": "Generating assets",
+            "error": None,
+            "progress_detail": {
+                "step": "assets",
+                "current": 0,
+                "total": total,
+                "message": "Preparing asset generation",
+            },
+        },
     )
 
-    async def _generate():
-        """后台生成任务"""
+    async def _generate_with_session(db_session: AsyncSession) -> None:
         try:
-            # TTS
-            state["progress_detail"] = {"step": "tts", "current": 0, "total": total, "message": "生成语音..."}
-            tts_results = await tts.generate_tts_batch(
-                shots=[{
-                    "shot_id": s.shot_id,
-                    "dialogue": s.audio_reference.content if s.audio_reference and s.audio_reference.type in ("dialogue", "narration") else None,
-                } for s in shots],
-                voice=voice,
+            _, story_context = await _load_story_context(
+                db_session,
+                tracking_story_id,
+                provider=llm["provider"],
+                model=llm["model"],
+                api_key=llm["api_key"],
+                base_url=llm["base_url"],
             )
 
-            # 图片
-            state["progress_detail"] = {"step": "image", "current": 0, "total": total, "message": "生成图片..."}
-            image_results = await image.generate_images_batch(
-                shots=[build_generation_payload(s, story_context, art_style=art_style) for s in shots],
-                model=image_model,
-                art_style=art_style,
-                **image_config,
-            )
+            generated_files: dict[str, dict] = {}
 
-            # 保存结果
-            state.update(
-                progress=60,
-                current_step=f"资产生成完成（TTS: {len(tts_results)}, 图片: {len(image_results)}）",
-                generated_files={
-                    "tts": {r["shot_id"]: r for r in tts_results},
-                    "images": {r["shot_id"]: r for r in image_results},
+            if generate_tts:
+                await _persist_manual_pipeline_state(
+                    db_session,
+                    project_id=project_id,
+                    pipeline_id=resolved_pipeline_id,
+                    story_id=tracking_story_id,
+                    updates={
+                        "status": PipelineStatus.GENERATING_ASSETS,
+                        "progress": 35,
+                        "current_step": "Generating TTS",
+                        "progress_detail": {
+                            "step": "tts",
+                            "current": 0,
+                            "total": total,
+                            "message": "Generating audio",
+                        },
+                    },
+                )
+                tts_results = await tts.generate_tts_batch(
+                    shots=[
+                        {
+                            "shot_id": shot.shot_id,
+                            "dialogue": (
+                                shot.audio_reference.content
+                                if shot.audio_reference
+                                and shot.audio_reference.type in ("dialogue", "narration")
+                                else None
+                            ),
+                        }
+                        for shot in shots
+                    ],
+                    voice=voice,
+                )
+                generated_files["tts"] = {result["shot_id"]: result for result in tts_results}
+
+            if generate_images:
+                await _persist_manual_pipeline_state(
+                    db_session,
+                    project_id=project_id,
+                    pipeline_id=resolved_pipeline_id,
+                    story_id=tracking_story_id,
+                    updates={
+                        "status": PipelineStatus.GENERATING_ASSETS,
+                        "progress": 45,
+                        "current_step": "Generating images",
+                        "progress_detail": {
+                            "step": "image",
+                            "current": 0,
+                            "total": total,
+                            "message": "Generating images",
+                        },
+                    },
+                )
+                image_results = await image.generate_images_batch(
+                    shots=[build_generation_payload(shot, story_context, art_style=art_style) for shot in shots],
+                    model=image_model,
+                    art_style=art_style,
+                    **image_config,
+                )
+                generated_files["images"] = {result["shot_id"]: result for result in image_results}
+
+            completion_parts = []
+            if generate_tts:
+                completion_parts.append("tts")
+            if generate_images:
+                completion_parts.append("images")
+
+            await _persist_manual_pipeline_state(
+                db_session,
+                project_id=project_id,
+                pipeline_id=resolved_pipeline_id,
+                story_id=tracking_story_id,
+                updates={
+                    "status": PipelineStatus.GENERATING_ASSETS,
+                    "progress": 60,
+                    "current_step": f"Assets ready: {', '.join(completion_parts)}",
+                    "error": None,
+                    "progress_detail": None,
+                    "generated_files": generated_files,
                 },
+                merge_generated_files=True,
             )
-        except Exception as e:
-            state.update(status=PipelineStatus.FAILED, error=str(e))
+        except Exception as exc:
+            logger.exception(
+                "Manual asset generation failed project_id=%s pipeline_id=%s story_id=%s",
+                project_id,
+                resolved_pipeline_id,
+                tracking_story_id,
+            )
+            await _persist_manual_pipeline_state(
+                db_session,
+                project_id=project_id,
+                pipeline_id=resolved_pipeline_id,
+                story_id=tracking_story_id,
+                updates={
+                    "status": PipelineStatus.FAILED,
+                    "current_step": "Asset generation failed",
+                    "error": str(exc),
+                    "progress_detail": None,
+                },
+                merge_generated_files=True,
+            )
+
+    async def _run_in_background() -> None:
+        async with AsyncSessionLocal() as db_session:
+            await _generate_with_session(db_session)
 
     if background_tasks:
-        background_tasks.add_task(_generate)
-        return {"project_id": project_id, "message": "资产生成任务已启动"}
-    else:
-        await _generate()
-        return {"project_id": project_id, "message": "资产生成完成", "state": state}
+        background_tasks.add_task(_run_in_background)
+        return PipelineActionResponse(
+            project_id=project_id,
+            pipeline_id=resolved_pipeline_id,
+            story_id=tracking_story_id,
+            message="Asset generation started",
+            state=_build_pipeline_status_response(project_id, initial_pipeline),
+        )
+
+    await _generate_with_session(db)
+    final_pipeline = await _load_pipeline_record(
+        db,
+        project_id=project_id,
+        pipeline_id=resolved_pipeline_id,
+        story_id=tracking_story_id,
+    )
+    return PipelineActionResponse(
+        project_id=project_id,
+        pipeline_id=resolved_pipeline_id,
+        story_id=tracking_story_id,
+        message="Asset generation finished",
+        state=_build_pipeline_status_response(project_id, final_pipeline),
+    )
 
 
-@router.post("/{project_id}/render-video")
+@router.post("/{project_id}/render-video", response_model=PipelineActionResponse)
 async def render_video(
     project_id: str,
     request: Request,
     shots_data: list[dict],
     video_config: dict = Depends(video_config_dep),
     llm: dict = Depends(llm_config_dep),
-    base_url: str = Query("http://localhost:8000", description="服务器地址"),
-    video_model: str = Query("wan2.6-i2v-flash", description="视频生成模型"),
-    story_id: str | None = Query(None, description="可选 story_id，用于应用一致性上下文"),
+    base_url: str = Query("http://localhost:8000", description="Backend base url"),
+    video_model: str = Query("wan2.6-i2v-flash", description="Video model"),
+    pipeline_id: str | None = Query(None, description="Optional manual pipeline id"),
+    story_id: str | None = Query(None, description="Stable story id for StoryContext loading"),
     background_tasks: BackgroundTasks = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    手动触发：图生视频
-
-    参数：
-    - shots_data: 镜头数据列表，每个包含 shot_id, image_url, visual_prompt, camera_motion
-    - base_url: 服务器地址（用于拼接本地图片 URL）
-    - video_model: 视频生成模型（默认：wan2.6-i2v-flash）
-    """
     from app.services import video
 
-    state = _get_or_create(project_id)
-    state.update(
-        status=PipelineStatus.RENDERING_VIDEO,
-        progress=65,
-        current_step="图生视频中",
-    )
+    tracking_story_id = resolve_tracking_story_id(project_id, _normalize_optional_id(story_id))
+    resolved_pipeline_id = _normalize_optional_id(pipeline_id) or str(uuid4())
     art_style = get_art_style(request)
-    _, story_context = await _load_story_context(
+    total = len(shots_data)
+
+    initial_pipeline = await _persist_manual_pipeline_state(
         db,
-        story_id,
-        provider=llm["provider"],
-        model=llm["model"],
-        api_key=llm["api_key"],
-        base_url=llm["base_url"],
+        project_id=project_id,
+        pipeline_id=resolved_pipeline_id,
+        story_id=tracking_story_id,
+        updates={
+            "status": PipelineStatus.RENDERING_VIDEO,
+            "progress": 65,
+            "current_step": "Rendering videos",
+            "error": None,
+            "progress_detail": {
+                "step": "video",
+                "current": 0,
+                "total": total,
+                "message": "Preparing video generation",
+            },
+        },
+        merge_generated_files=True,
     )
 
-    async def _render():
-        """后台渲染任务"""
+    async def _render_with_session(db_session: AsyncSession) -> None:
         try:
-            total = len(shots_data)
-            state["progress_detail"] = {"step": "video", "current": 0, "total": total, "message": "生成视频..."}
+            _, story_context = await _load_story_context(
+                db_session,
+                tracking_story_id,
+                provider=llm["provider"],
+                model=llm["model"],
+                api_key=llm["api_key"],
+                base_url=llm["base_url"],
+            )
 
             prepared_shots = []
             for shot in shots_data:
@@ -394,65 +621,102 @@ async def render_video(
                 **video_config,
             )
 
-            state.update(
-                progress=85,
-                current_step=f"视频渲染完成（{len(video_results)} 个）",
-                generated_files={"videos": {r["shot_id"]: r for r in video_results}},
+            await _persist_manual_pipeline_state(
+                db_session,
+                project_id=project_id,
+                pipeline_id=resolved_pipeline_id,
+                story_id=tracking_story_id,
+                updates={
+                    "status": PipelineStatus.RENDERING_VIDEO,
+                    "progress": 85,
+                    "current_step": f"Videos ready: {len(video_results)} shots",
+                    "error": None,
+                    "progress_detail": None,
+                    "generated_files": {
+                        "videos": {result["shot_id"]: result for result in video_results},
+                    },
+                },
+                merge_generated_files=True,
             )
-        except Exception as e:
-            state.update(status=PipelineStatus.FAILED, error=str(e))
+        except Exception as exc:
+            logger.exception(
+                "Manual video rendering failed project_id=%s pipeline_id=%s story_id=%s",
+                project_id,
+                resolved_pipeline_id,
+                tracking_story_id,
+            )
+            await _persist_manual_pipeline_state(
+                db_session,
+                project_id=project_id,
+                pipeline_id=resolved_pipeline_id,
+                story_id=tracking_story_id,
+                updates={
+                    "status": PipelineStatus.FAILED,
+                    "current_step": "Video rendering failed",
+                    "error": str(exc),
+                    "progress_detail": None,
+                },
+                merge_generated_files=True,
+            )
+
+    async def _run_in_background() -> None:
+        async with AsyncSessionLocal() as db_session:
+            await _render_with_session(db_session)
 
     if background_tasks:
-        background_tasks.add_task(_render)
-        return {"project_id": project_id, "message": "视频渲染任务已启动"}
-    else:
-        await _render()
-        return {"project_id": project_id, "message": "视频渲染完成", "state": state}
+        background_tasks.add_task(_run_in_background)
+        return PipelineActionResponse(
+            project_id=project_id,
+            pipeline_id=resolved_pipeline_id,
+            story_id=tracking_story_id,
+            message="Video rendering started",
+            state=_build_pipeline_status_response(project_id, initial_pipeline),
+        )
 
+    await _render_with_session(db)
+    final_pipeline = await _load_pipeline_record(
+        db,
+        project_id=project_id,
+        pipeline_id=resolved_pipeline_id,
+        story_id=tracking_story_id,
+    )
+    return PipelineActionResponse(
+        project_id=project_id,
+        pipeline_id=resolved_pipeline_id,
+        story_id=tracking_story_id,
+        message="Video rendering finished",
+        state=_build_pipeline_status_response(project_id, final_pipeline),
+    )
 
 @router.get("/{project_id}/status", response_model=PipelineStatusResponse)
-async def get_status(project_id: str, pipeline_id: str = None, db: AsyncSession = Depends(get_db)):
-    """
-    获取流水线状态
+async def get_status(
+    project_id: str,
+    pipeline_id: str | None = None,
+    story_id: str | None = Query(None, description="Stable story id for pipeline lookup"),
+    db: AsyncSession = Depends(get_db),
+):
+    normalized_pipeline_id = _normalize_optional_id(pipeline_id)
+    normalized_story_id = _normalize_optional_id(story_id)
 
-    参数：
-    - project_id: 项目 ID
-    - pipeline_id: 流水线 ID（可选，如果不提供则返回最新的）
-
-    优先级：
-    1. 手动步进的内存状态（_pipeline_states）
-    2. 指定 pipeline_id 的数据库记录
-    3. 最新的数据库记录
-    4. 默认待机状态
-    """
-    # 手动步进模式：内存状态优先（仅在未指定 pipeline_id 时）
-    if not pipeline_id and project_id in _pipeline_states:
-        pipeline = _pipeline_states[project_id]
-    elif pipeline_id:
-        pipeline = await repo.get_pipeline(db, pipeline_id)
+    pipeline = None
+    if normalized_pipeline_id:
+        pipeline = await repo.get_pipeline(db, normalized_pipeline_id)
         if not pipeline:
             raise HTTPException(status_code=404, detail="Pipeline not found")
+    elif normalized_story_id:
+        pipeline = await repo.get_pipeline_by_story(db, normalized_story_id)
     else:
         pipeline = await repo.get_pipeline_by_story(db, project_id)
-        if not pipeline:
-            pipeline = {
-                "status": PipelineStatus.PENDING,
-                "progress": 0,
-                "current_step": "等待开始",
-                "error": None,
-                "progress_detail": None,
-                "generated_files": None,
-            }
 
-    return PipelineStatusResponse(
-        project_id=project_id,
-        status=pipeline.get("status", PipelineStatus.PENDING),
-        progress=pipeline.get("progress", 0),
-        current_step=pipeline.get("current_step", "等待开始"),
-        error=pipeline.get("error"),
-        progress_detail=pipeline.get("progress_detail"),
-        generated_files=pipeline.get("generated_files"),
-    )
+    if not pipeline:
+        pipeline = _default_pipeline_record(project_id=project_id, story_id=normalized_story_id)
+
+    if "id" not in pipeline:
+        pipeline["id"] = normalized_pipeline_id
+    if not pipeline.get("story_id"):
+        pipeline["story_id"] = normalized_story_id or project_id
+
+    return _build_pipeline_status_response(project_id, pipeline)
 
 
 @router.post("/{project_id}/concat", response_model=ConcatResponse)
@@ -460,69 +724,93 @@ async def concat_videos(
     project_id: str,
     req: ConcatRequest,
     request: Request,
+    pipeline_id: str | None = Query(None, description="Optional manual pipeline id"),
+    story_id: str | None = Query(None, description="Stable story id for pipeline lookup"),
+    db: AsyncSession = Depends(get_db),
 ):
-    """
-    将多个镜头视频按顺序拼接为一个完整 MP4。
-
-    使用 ffmpeg concat + stream copy，不重编码，速度极快。
-    """
-    from app.services.ffmpeg import concat_videos as do_concat, _url_to_local_path, VIDEO_DIR
+    from app.services.ffmpeg import VIDEO_DIR, _url_to_local_path, concat_videos as do_concat
 
     if not req.video_urls:
-        raise HTTPException(status_code=400, detail="视频列表为空")
+        raise HTTPException(status_code=400, detail="Video list is empty")
 
+    normalized_pipeline_id = _normalize_optional_id(pipeline_id)
+    tracking_story_id = resolve_tracking_story_id(project_id, _normalize_optional_id(story_id))
     base_url = str(request.base_url).rstrip("/")
-
-    # URL → 本地路径
     local_paths = [_url_to_local_path(url, base_url) for url in req.video_urls]
-
     output_path = str(VIDEO_DIR / f"episode_{project_id}.mp4")
+
+    if normalized_pipeline_id:
+        await _persist_manual_pipeline_state(
+            db,
+            project_id=project_id,
+            pipeline_id=normalized_pipeline_id,
+            story_id=tracking_story_id,
+            updates={
+                "status": PipelineStatus.STITCHING,
+                "progress": 90,
+                "current_step": "Concatenating videos",
+                "error": None,
+                "progress_detail": None,
+            },
+            merge_generated_files=True,
+        )
 
     try:
         await do_concat(local_paths, output_path)
     except (FileNotFoundError, ValueError) as exc:
+        if normalized_pipeline_id:
+            await _persist_manual_pipeline_state(
+                db,
+                project_id=project_id,
+                pipeline_id=normalized_pipeline_id,
+                story_id=tracking_story_id,
+                updates={
+                    "status": PipelineStatus.FAILED,
+                    "current_step": "Video concat failed",
+                    "error": str(exc),
+                    "progress_detail": None,
+                },
+                merge_generated_files=True,
+            )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
+        if normalized_pipeline_id:
+            await _persist_manual_pipeline_state(
+                db,
+                project_id=project_id,
+                pipeline_id=normalized_pipeline_id,
+                story_id=tracking_story_id,
+                updates={
+                    "status": PipelineStatus.FAILED,
+                    "current_step": "Video concat failed",
+                    "error": str(exc),
+                    "progress_detail": None,
+                },
+                merge_generated_files=True,
+            )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     video_url = f"/{output_path}"
-    return ConcatResponse(video_url=video_url)
 
+    if normalized_pipeline_id:
+        await _persist_manual_pipeline_state(
+            db,
+            project_id=project_id,
+            pipeline_id=normalized_pipeline_id,
+            story_id=tracking_story_id,
+            updates={
+                "status": PipelineStatus.COMPLETE,
+                "progress": 100,
+                "current_step": "Video concat complete",
+                "error": None,
+                "progress_detail": None,
+                "generated_files": {"final_video_url": video_url},
+            },
+            merge_generated_files=True,
+        )
 
-@router.post("/{project_id}/stitch")
-async def stitch_video(
-    project_id: str,
-    shots_data: list[dict],
-    background_tasks: BackgroundTasks = None,
-):
-    """
-    手动触发：FFmpeg 合成音视频
-
-    参数：
-    - shots_data: 镜头数据列表，每个包含 shot_id, video_url, audio_url（可选）
-    """
-    state = _get_or_create(project_id)
-    state.update(status=PipelineStatus.STITCHING, progress=90, current_step="FFmpeg 合成中")
-
-    async def _stitch():
-        """后台合成任务"""
-        try:
-            # TODO: 实现真实的 FFmpeg 合成逻辑
-            # 目前先模拟
-            import asyncio
-            await asyncio.sleep(2)
-
-            state.update(
-                status=PipelineStatus.COMPLETE,
-                progress=100,
-                current_step="视频合成完成",
-            )
-        except Exception as e:
-            state.update(status=PipelineStatus.FAILED, error=str(e))
-
-    if background_tasks:
-        background_tasks.add_task(_stitch)
-        return {"project_id": project_id, "message": "视频合成任务已启动"}
-    else:
-        await _stitch()
-        return {"project_id": project_id, "message": "视频合成完成", "state": state}
+    return ConcatResponse(
+        video_url=video_url,
+        pipeline_id=normalized_pipeline_id,
+        story_id=tracking_story_id,
+    )

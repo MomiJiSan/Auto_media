@@ -10,16 +10,29 @@ from app.schemas.pipeline import GenerationStrategy, PipelineStatus
 from app.services import tts, image, video, ffmpeg
 from app.services.storyboard import parse_script_to_storyboard
 from app.services import story_repository as repo
+from app.core.story_assets import get_character_design_prompt
 from app.core.story_context import StoryContext, build_generation_payload
 from app.core.api_keys import inject_art_style
+from app.core.pipeline_runtime import (
+    build_runtime_strategy_metadata,
+    get_runtime_strategy_note,
+)
 from app.services.story_context_service import prepare_story_context
 
 
 class PipelineExecutor:
     """流水线执行器 - 处理完整的视频生成流程"""
 
-    def __init__(self, project_id: str, pipeline_id: str, db: AsyncSession):
+    def __init__(
+        self,
+        project_id: str,
+        pipeline_id: str,
+        db: AsyncSession,
+        *,
+        story_id: Optional[str] = None,
+    ):
         self.project_id = project_id
+        self.story_id = story_id or project_id
         self.pipeline_id = pipeline_id
         self.db = db
         self.shots: List[Shot] = []
@@ -28,6 +41,8 @@ class PipelineExecutor:
         self.character_info: Optional[dict] = None
         self.art_style: str = ""
         self.story_context: Optional[StoryContext] = None
+        self.strategy: GenerationStrategy = GenerationStrategy.SEPARATED
+        self.runtime_strategy_metadata: dict[str, object] = {}
 
     async def run_full_pipeline(
         self,
@@ -54,11 +69,14 @@ class PipelineExecutor:
         self.base_url = base_url
         self.character_info = character_info
         self.art_style = art_style
+        self.strategy = strategy
+        self.runtime_strategy_metadata = build_runtime_strategy_metadata(strategy)
         self.story_context = None
-        if story_id:
+        effective_story_id = (story_id or self.story_id or "").strip()
+        if effective_story_id:
             _, self.story_context = await prepare_story_context(
                 self.db,
-                story_id,
+                effective_story_id,
                 provider=provider,
                 model=model or "",
                 api_key=llm_api_key,
@@ -112,7 +130,10 @@ class PipelineExecutor:
                 PipelineStatus.COMPLETE,
                 100,
                 "视频生成完成",
-                generated_files={"shots": self.results},
+                generated_files={
+                    "shots": self.results,
+                    "meta": dict(self.runtime_strategy_metadata),
+                },
             )
 
         except Exception as e:
@@ -246,7 +267,7 @@ class PipelineExecutor:
     def _enhance_prompt_with_character(visual_prompt: str, character_info: Optional[dict]) -> str:
         """
         角色 prompt 增强：检查 visual_prompt 中是否提及角色名，
-        如果匹配到，将角色人设图的 portrait prompt 拼接到 visual_prompt 尾部。
+        如果匹配到，将角色设定图提示词拼接到 visual_prompt 尾部。
 
         Args:
             visual_prompt: 原始视觉提示词
@@ -272,11 +293,11 @@ class PipelineExecutor:
             # 检查角色名是否出现在 visual_prompt 中（不区分大小写）
             if char_name.lower() not in visual_prompt.lower():
                 continue
-            # 从 character_images 中查找该角色的 prompt
-            char_img = character_images.get(char_name, {})
-            portrait_prompt = char_img.get("prompt", "")
-            if portrait_prompt:
-                additions.append(f"[Character {char_name}: {portrait_prompt}]")
+            # Legacy fallback: prefer the modern design prompt, then fall back to the
+            # compatibility prompt field kept in character_images.
+            design_prompt = get_character_design_prompt(character_images, char_name)
+            if design_prompt:
+                additions.append(f"[Character {char_name}: {design_prompt}]")
 
         if not additions:
             return visual_prompt
@@ -480,8 +501,13 @@ class PipelineExecutor:
         await self._update_state(
             PipelineStatus.RENDERING_VIDEO,
             55,
-            "生成视频和语音中",
-            {"step": "video_integrated", "current": 0, "total": total, "message": "正在生成视频和语音..."},
+            "integrated 策略已降级为图生视频 fallback",
+            {
+                "step": "video_integrated",
+                "current": 0,
+                "total": total,
+                "message": "正在以图生视频 fallback 方式执行 integrated 策略，不包含语音一体化。",
+            },
         )
 
         # TODO: 调用支持视频语音一体生成的 API
@@ -524,6 +550,18 @@ class PipelineExecutor:
             }
             self.results.append(result)
 
+        await self._update_state(
+            PipelineStatus.RENDERING_VIDEO,
+            85,
+            get_runtime_strategy_note(self.strategy) or "integrated fallback 执行完成",
+            {
+                "step": "video_integrated",
+                "current": total,
+                "total": total,
+                "message": "integrated 策略 fallback 执行完成",
+            },
+        )
+
     async def _stitch_videos(self):
         """使用 FFmpeg 合成音视频（仅分离式策略需要）"""
         total = len(self.results)
@@ -554,7 +592,7 @@ class PipelineExecutor:
         generated_files: Optional[dict] = None,
     ):
         """更新流水线状态到数据库"""
-        await repo.save_pipeline(self.db, self.pipeline_id, self.project_id, {
+        await repo.save_pipeline(self.db, self.pipeline_id, self.story_id, {
             "status": status,
             "progress": progress,
             "current_step": current_step,

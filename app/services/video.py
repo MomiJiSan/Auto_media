@@ -6,6 +6,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -29,7 +30,7 @@ def _versioned_media_name(stem: str, suffix: str) -> str:
     return f"{safe_stem}_{token}{suffix}"
 
 
-async def _retryable_generate(
+async def _generate_remote_video(
     provider,
     image_url: str,
     prompt: str,
@@ -38,35 +39,24 @@ async def _retryable_generate(
     video_base_url: str,
     last_frame_url: str,
     negative_prompt: str,
-    shot_id: str,
 ) -> str:
-    attempts = 3
-    last_exc: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        try:
-            return await provider.generate(
-                image_url,
-                prompt,
-                model,
-                video_api_key,
-                video_base_url,
-                last_frame_url,
-                negative_prompt,
-            )
-        except (httpx.ReadError, httpx.ConnectError, httpx.RemoteProtocolError, TimeoutError) as exc:
-            last_exc = exc
-            logger.warning(
-                "Video provider transient failure for shot_id=%s attempt=%s/%s: %r",
-                shot_id,
-                attempt,
-                attempts,
-                exc,
-            )
-            if attempt == attempts:
-                break
-            await asyncio.sleep(min(2 * attempt, 5))
-    assert last_exc is not None
-    raise last_exc
+    return await provider.generate(
+        image_url,
+        prompt,
+        model,
+        video_api_key,
+        video_base_url,
+        last_frame_url,
+        negative_prompt,
+    )
+
+
+def _sanitize_remote_url(remote_url: str) -> str:
+    parsed = urlparse(remote_url or "")
+    if not parsed.scheme and not parsed.netloc:
+        return remote_url
+    sanitized = f"{parsed.scheme}://{parsed.netloc}{parsed.path}" if parsed.scheme else f"{parsed.netloc}{parsed.path}"
+    return sanitized or remote_url
 
 
 async def _download_video_with_retry(remote_url: str, shot_id: str) -> bytes:
@@ -85,7 +75,7 @@ async def _download_video_with_retry(remote_url: str, shot_id: str) -> bytes:
                 shot_id,
                 attempt,
                 attempts,
-                remote_url,
+                _sanitize_remote_url(remote_url),
                 exc,
             )
             if attempt == attempts:
@@ -122,7 +112,7 @@ async def generate_video(
         { shot_id, video_path, video_url }
     """
     provider = get_video_provider(video_provider)
-    remote_url = await _retryable_generate(
+    remote_url = await _generate_remote_video(
         provider,
         image_url=image_url,
         prompt=prompt,
@@ -131,7 +121,6 @@ async def generate_video(
         video_base_url=video_base_url,
         last_frame_url=last_frame_url,
         negative_prompt=negative_prompt,
-        shot_id=shot_id,
     )
     video_bytes = await _download_video_with_retry(remote_url, shot_id)
 

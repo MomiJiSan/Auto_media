@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import json
 import re
@@ -7,12 +8,24 @@ from typing import Any, Mapping
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.story_context import StoryContext, build_story_context
+from app.core.config import settings
+from app.core.story_assets import (
+    build_character_asset_record,
+    get_character_asset_entry,
+    get_character_design_prompt,
+)
+from app.core.story_context import (
+    StoryContext,
+    build_story_context,
+    sanitize_body_features,
+    sanitize_default_clothing,
+)
 from app.services import story_repository as repo
 from app.services.llm.factory import get_llm_provider
 
 
 _logger = logging.getLogger(__name__)
+_story_context_locks: dict[str, asyncio.Lock] = {}
 
 
 APPEARANCE_SYSTEM_PROMPT = """
@@ -70,6 +83,16 @@ def _trim_words(text: str, limit: int) -> str:
     return " ".join(words[:limit]).strip(" ,.;:!?，。；：！？、")
 
 
+_PROVIDER_KEY_ATTRS = {
+    "claude": "anthropic_api_key",
+    "openai": "openai_api_key",
+    "qwen": "qwen_api_key",
+    "zhipu": "zhipu_api_key",
+    "gemini": "gemini_api_key",
+    "siliconflow": "siliconflow_api_key",
+}
+
+
 def _parse_json(content: str) -> dict[str, Any]:
     normalized = content.strip()
     fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", normalized, flags=re.IGNORECASE)
@@ -93,6 +116,30 @@ def _needs_scene_style_cache(story: Mapping[str, Any]) -> bool:
     meta = dict(story.get("meta") or {})
     cached = meta.get("scene_style_cache") or []
     return bool(story.get("selected_setting")) and not cached
+
+
+def _has_effective_llm_credentials(provider: str, api_key: str) -> bool:
+    normalized_provider = (provider or "").strip().lower()
+    if api_key:
+        return True
+    key_attr = _PROVIDER_KEY_ATTRS.get(normalized_provider)
+    return bool(key_attr and getattr(settings, key_attr, ""))
+
+
+def _normalize_appearance_entry(
+    description: str,
+    entry: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    entry = entry or {}
+    body = sanitize_body_features(str(entry.get("body", "")), fallback_description=description)
+    clothing = sanitize_default_clothing(str(entry.get("clothing", "")), fallback_description=description)
+    negative_prompt = _trim_words(str(entry.get("negative_prompt", "")), 12)
+    normalized = {
+        "body": _trim_words(body, 18),
+        "clothing": _trim_words(clothing, 12),
+        "negative_prompt": negative_prompt,
+    }
+    return {key: value for key, value in normalized.items() if value}
 
 
 async def extract_character_appearance(
@@ -145,11 +192,9 @@ async def extract_character_appearance(
         entry = parsed.get(name) or {}
         if not isinstance(entry, Mapping):
             continue
-        output[name] = {
-            "body": _trim_words(str(entry.get("body", "")), 18),
-            "clothing": _trim_words(str(entry.get("clothing", "")), 12),
-            "negative_prompt": _trim_words(str(entry.get("negative_prompt", "")), 12),
-        }
+        normalized_entry = _normalize_appearance_entry(str(character.get("description", "")), entry)
+        if normalized_entry:
+            output[name] = normalized_entry
     return {name: value for name, value in output.items() if any(value.values())}
 
 
@@ -222,11 +267,22 @@ async def _project_visual_dna(
         body = _collapse_spaces(str(appearance.get("body", "")))
         if not body:
             continue
-        current = dict(existing_images.get(name) or {})
+        current = get_character_asset_entry(existing_images, name)
+        has_existing_asset = any(
+            _collapse_spaces(str(current.get(field, "")))
+            for field in ("image_url", "image_path", "design_prompt", "prompt", "visual_dna")
+        )
+        if not has_existing_asset:
+            continue
         if _collapse_spaces(str(current.get("visual_dna", ""))) == body:
             continue
-        current["visual_dna"] = body
-        updates[name] = current
+        updates[name] = build_character_asset_record(
+            image_url=_collapse_spaces(str(current.get("image_url", ""))),
+            image_path=_collapse_spaces(str(current.get("image_path", ""))),
+            prompt=get_character_design_prompt(existing_images, name),
+            existing=current,
+            visual_dna=body,
+        )
 
     if updates:
         await repo.upsert_character_images(db, story_id, updates)
@@ -248,39 +304,43 @@ async def prepare_story_context(
     if not story:
         return {}, None
 
-    can_call_llm = bool(provider and api_key)
+    can_call_llm = bool(provider) and _has_effective_llm_credentials(provider, api_key)
+    story_lock = _story_context_locks.setdefault(story_id, asyncio.Lock())
 
-    if can_call_llm and _needs_appearance_cache(story):
-        try:
-            appearance_cache = dict((story.get("meta") or {}).get("character_appearance_cache") or {})
-            extracted = await extract_character_appearance(
-                story,
-                provider=provider,
-                model=model,
-                api_key=api_key,
-                base_url=base_url,
-            )
-            if extracted:
-                appearance_cache.update(extracted)
-                await repo.upsert_story_meta_cache(db, story_id, "character_appearance_cache", appearance_cache)
-                await _project_visual_dna(db, story_id, story, appearance_cache)
-                story = await repo.get_story(db, story_id)
-        except Exception:
-            _logger.exception("Failed to extract character appearance cache for story_id=%s", story_id)
+    if can_call_llm:
+        async with story_lock:
+            story = await repo.get_story(db, story_id)
+            if _needs_appearance_cache(story):
+                try:
+                    appearance_cache = dict((story.get("meta") or {}).get("character_appearance_cache") or {})
+                    extracted = await extract_character_appearance(
+                        story,
+                        provider=provider,
+                        model=model,
+                        api_key=api_key,
+                        base_url=base_url,
+                    )
+                    if extracted:
+                        appearance_cache.update(extracted)
+                        await repo.upsert_story_meta_cache(db, story_id, "character_appearance_cache", appearance_cache)
+                        await _project_visual_dna(db, story_id, story, appearance_cache)
+                        story = await repo.get_story(db, story_id)
+                except Exception:
+                    _logger.exception("Failed to extract character appearance cache for story_id=%s", story_id)
 
-    if can_call_llm and _needs_scene_style_cache(story):
-        try:
-            styles = await extract_scene_style_cache(
-                story,
-                provider=provider,
-                model=model,
-                api_key=api_key,
-                base_url=base_url,
-            )
-            if styles:
-                await repo.upsert_story_meta_cache(db, story_id, "scene_style_cache", styles)
-                story = await repo.get_story(db, story_id)
-        except Exception:
-            _logger.exception("Failed to extract scene style cache for story_id=%s", story_id)
+            if _needs_scene_style_cache(story):
+                try:
+                    styles = await extract_scene_style_cache(
+                        story,
+                        provider=provider,
+                        model=model,
+                        api_key=api_key,
+                        base_url=base_url,
+                    )
+                    if styles:
+                        await repo.upsert_story_meta_cache(db, story_id, "scene_style_cache", styles)
+                        story = await repo.get_story(db, story_id)
+                except Exception:
+                    _logger.exception("Failed to extract scene style cache for story_id=%s", story_id)
 
     return story, build_story_context(story)

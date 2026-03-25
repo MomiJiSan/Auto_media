@@ -5,6 +5,9 @@ export const useStoryStore = defineStore('story', {
   state: () => ({
     currentStep: 1,
     storyId: null,
+    manualProjectId: '',
+    manualPipelineId: '',
+    manualStoryId: '',
     input: { idea: '', genre: '', tone: '' },
     analysis: '',
     suggestions: [],
@@ -28,6 +31,16 @@ export const useStoryStore = defineStore('story', {
     totalTokens: (state) => state.usage.prompt_tokens + state.usage.completion_tokens,
   },
   actions: {
+    setManualPipelineContext({ projectId = '', pipelineId = '', storyId = '' } = {}) {
+      if (projectId) this.manualProjectId = projectId
+      if (pipelineId) this.manualPipelineId = pipelineId
+      if (storyId) this.manualStoryId = storyId
+    },
+    clearManualPipelineContext({ keepProjectId = '', keepStoryId = '' } = {}) {
+      this.manualProjectId = keepProjectId || ''
+      this.manualPipelineId = ''
+      this.manualStoryId = keepStoryId || ''
+    },
     setSelectedSetting(val) { this.selectedSetting = val },
     setArtStyle(val) {
       if (typeof val !== 'string') {
@@ -40,6 +53,12 @@ export const useStoryStore = defineStore('story', {
     setStep(n) { this.currentStep = n },
     setInput(idea, genre, tone) { this.input = { idea, genre, tone } },
     setAnalyzeResult({ story_id, analysis, suggestions, placeholder, usage }) {
+      if (story_id && story_id !== this.storyId) {
+        this.clearManualPipelineContext({
+          keepProjectId: story_id,
+          keepStoryId: story_id,
+        })
+      }
       this.storyId = story_id
       this.analysis = analysis
       this.suggestions = suggestions
@@ -50,6 +69,12 @@ export const useStoryStore = defineStore('story', {
       }
     },
     setOutlineResult({ story_id, meta, characters, relationships, outline, usage }) {
+      if (story_id && story_id !== this.storyId) {
+        this.clearManualPipelineContext({
+          keepProjectId: story_id,
+          keepStoryId: story_id,
+        })
+      }
       this.storyId = story_id
       if (meta != null) this.meta = meta
       if (characters != null && characters.length > 0) this.characters = characters
@@ -68,7 +93,15 @@ export const useStoryStore = defineStore('story', {
         this.scenes.push(scene)
       }
     },
-    resetScenes() { this.scenes = []; this.shots = []; this.step3Done = false },
+    resetScenes() {
+      this.scenes = []
+      this.shots = []
+      this.step3Done = false
+      this.clearManualPipelineContext({
+        keepProjectId: this.storyId || '',
+        keepStoryId: this.storyId || '',
+      })
+    },
     setShots(shots) {
       this.shots = shots.map(s => ({ ...s, ttsLoading: false, imageLoading: false, videoLoading: false }))
     },
@@ -103,6 +136,10 @@ export const useStoryStore = defineStore('story', {
       // 从服务器数据恢复完整 store 状态（用于历史剧本恢复）
       this.$reset()
       this.storyId = storyData.id
+      this.clearManualPipelineContext({
+        keepProjectId: storyData.id || '',
+        keepStoryId: storyData.id || '',
+      })
       this.input = {
         idea: storyData.idea || '',
         genre: storyData.genre || '',
@@ -139,6 +176,10 @@ export const useStoryStore = defineStore('story', {
         this.step3Done = false
         this.selectedSetting = ''
         this.artStyle = ''
+        this.clearManualPipelineContext({
+          keepProjectId: story_id || '',
+          keepStoryId: story_id || '',
+        })
       }
       this.storyId = story_id
       this.wbTurn = turn

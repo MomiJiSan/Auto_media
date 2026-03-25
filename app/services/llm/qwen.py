@@ -40,15 +40,18 @@ class QwenProvider(BaseLLMProvider):
             temperature=temperature,
             messages=request_messages,
             stream=True,
+            stream_options={"include_usage": True},
         )
 
         chunks: list[str] = []
         prompt_tokens = 0
         completion_tokens = 0
         async for chunk in stream:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                chunks.append(delta)
+            choices = getattr(chunk, "choices", None) or []
+            if choices:
+                delta = getattr(choices[0].delta, "content", None)
+                if delta:
+                    chunks.append(delta)
             usage_obj = getattr(chunk, "usage", None)
             if usage_obj:
                 prompt_tokens += getattr(usage_obj, "prompt_tokens", 0) or 0

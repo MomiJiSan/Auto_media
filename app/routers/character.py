@@ -4,6 +4,7 @@ from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.api_keys import image_config_dep, get_art_style
+from app.core.story_assets import build_character_asset_record, get_character_asset_entry
 from app.services.image import generate_character_image, generate_character_images_batch, DEFAULT_MODEL
 from app.services import story_repository as repo
 
@@ -57,12 +58,15 @@ async def generate_single(body: CharacterImageRequest, request: Request, image_c
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"角色人设图生成失败: {e}") from e
 
+    story = await repo.get_story(db, body.story_id)
+    character_images = story.get("character_images", {}) if story else {}
     await repo.upsert_character_images(db, body.story_id, {
-        body.character_name: {
-            "image_url": result["image_url"],
-            "image_path": result["image_path"],
-            "prompt": result["prompt"],
-        }
+        body.character_name: build_character_asset_record(
+            image_url=result["image_url"],
+            image_path=result["image_path"],
+            prompt=result["prompt"],
+            existing=get_character_asset_entry(character_images, body.character_name),
+        )
     })
     if art_style:
         await repo.save_story(db, body.story_id, {"art_style": art_style})
@@ -92,6 +96,8 @@ async def generate_all(body: BatchCharacterRequest, request: Request, image_conf
     valid_results = []
     errors = []
     new_images = {}
+    story = await repo.get_story(db, body.story_id)
+    character_images = story.get("character_images", {}) if story else {}
 
     for i, result in enumerate(raw_results):
         char_name = body.characters[i]["name"] if i < len(body.characters) else "unknown"
@@ -99,11 +105,12 @@ async def generate_all(body: BatchCharacterRequest, request: Request, image_conf
             errors.append(CharacterImageError(character_name=char_name, error=result["error"]))
             continue
 
-        new_images[char_name] = {
-            "image_url": result["image_url"],
-            "image_path": result["image_path"],
-            "prompt": result["prompt"],
-        }
+        new_images[char_name] = build_character_asset_record(
+            image_url=result["image_url"],
+            image_path=result["image_path"],
+            prompt=result["prompt"],
+            existing=get_character_asset_entry(character_images, char_name),
+        )
         valid_results.append(CharacterImageResult(
             character_name=result["character_name"],
             image_url=result["image_url"],
