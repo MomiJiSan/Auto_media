@@ -319,6 +319,69 @@ Story.character_images["黎明"]["visual_dna"] = "young male, silver-white hair,
 
 如果命中第 2 层，仅能直接作为 `body_features` 使用；`default_clothing` 仍应为空或再次提取。
 
+### 5.5 从硬编码提取演进到 DSPy
+
+当前文档里的 `APPEARANCE_EXTRACT_PROMPT` 更适合作为 Phase 2 前的过渡实现，不建议长期继续作为主路径。
+
+更稳的演进方向是：
+
+1. 保留 `CharacterLock` 作为运行时统一结构
+2. 用 DSPy `Signature` + `TypedPredictor` 替代长字符串提取 prompt
+3. 继续把结果写回 `meta["character_appearance_cache"]`
+4. 生产环境只加载离线编译好的模块，不在请求链路实时 compile
+
+建议的目标签名：
+
+```python
+class CharacterAppearance(BaseModel):
+    body: str = Field(description="immutable traits only, max 25 words")
+    clothing: str = Field(description="default outfit only, max 15 words")
+
+
+class ExtractCharacterLock(dspy.Signature):
+    character_name = dspy.InputField()
+    character_description = dspy.InputField()
+    output: CharacterAppearance = dspy.OutputField()
+```
+
+建议模块形态：
+
+```python
+class AppearanceModule(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.extractor = dspy.TypedPredictor(ExtractCharacterLock)
+
+    def forward(self, name: str, description: str):
+        return self.extractor(
+            character_name=name,
+            character_description=description,
+        )
+```
+
+设计要求：
+
+- DSPy 只负责“结构化提取”，不直接决定运行期 prompt 拼装
+- 运行期主契约仍然是 `CharacterLock`
+- 缓存格式保持兼容：
+
+```json
+{
+  "body": "...",
+  "clothing": "...",
+  "negative_prompt": "...",
+  "source": "dspy_compiled_v1"
+}
+```
+
+- 如果 DSPy 不可用，仍按 5.4 节的顺序回退，不阻断旧链路
+
+工程约束：
+
+- DSPy compile 只允许在开发/离线环境执行
+- FastAPI 生产链路只做 load，不做 compile
+- 黄金样本集规模可先保持很小，目标是稳定性回归，不是离线大训练
+
 ---
 
 ## 六、场景风格来源
@@ -469,6 +532,58 @@ last_frame_prompt = payload.get("last_frame_prompt")
 
 若视频提供方未来支持独立 negative 参数，再追加 `payload["negative_prompt"]`；在此之前，视频层默认只消费正向 prompt。
 
+### 7.5 生成后反馈闭环的拼装方式
+
+仅靠前置 prompt 约束无法完全覆盖图片/视频模型的随机漂移，因此主方案里应预留“生成后检查 -> 局部重试”的闭环能力。
+
+建议原则：
+
+1. 闭环挂在 `PipelineExecutor`，不挂在 router 或 provider
+2. 反馈只增强当前 shot，不回滚整条 pipeline
+3. 反馈文本不直接替换原 prompt 主体，而是作为增量纠错指令并入 payload
+
+建议增加的运行时字段：
+
+```python
+shot.extra_instructions: str | None = None
+```
+
+组装顺序建议为：
+
+```text
+[CharacterLock] + [原始 image/final/last_frame prompt] + [scene style] + [retry extra_instructions] + [art_style]
+```
+
+这样做的目的：
+
+- 保留分镜 LLM 已产出的主骨架
+- 避免 VLM 反馈重写整条 prompt
+- 让一次失败后的修正范围局限在当前镜头
+
+建议的最小闭环：
+
+```python
+for attempt in range(max_retries + 1):
+    payload = build_generation_payload(shot, ctx)
+    result = await generate(...)
+    judge = await vlm_check(result, shot, ctx)
+    if judge["passed"]:
+        return result
+    shot.extra_instructions = judge["feedback"]
+```
+
+必检与抽检建议：
+
+- 必检：新角色首次登场、大跨度换装、依赖 `last_frame_prompt` 的终态镜头
+- 抽检：同场景连续镜头每 3-5 镜一次
+- 默认不全量开启，避免成本和耗时失控
+
+失败兜底建议：
+
+- 单镜头最多 1-2 次重试
+- 超过重试阈值后保留最后结果
+- 同时标记为人工复核，而不是无限自动重跑
+
 ---
 
 ## 八、上游修复：干净版 Character Section
@@ -536,6 +651,8 @@ character_section = character_section_override or build_character_section(charac
    - 构建 `StoryContext`
    - `_build_image_prompts()` / `_build_video_prompt()` 改为委托 `build_generation_payload()`
    - `_enhance_prompt_with_character()` 标记 `@deprecated`，短期保留兼容签名
+   - 为图片/视频生成节点预留 `FeedbackPolicy` 与 VLM 质检插槽
+   - 只对“关键镜头 / 抽检镜头”启用闭环，不对每个 shot 默认全量重试
 
 3. `app/services/storyboard.py`
    - `parse_script_to_storyboard()` 新增 `character_section_override`
@@ -566,6 +683,7 @@ character_section = character_section_override or build_character_section(charac
    - 例如：
      - `upsert_story_meta_cache(story_id, key, value)`
      - `remove_story_meta_keys(story_id, keys)`
+   - 若后续需要记录反馈闭环的人工复核状态，也建议放在 repository helper 中统一处理，而不是在 executor 里直接裸写 `meta`
 
 9. `app/routers/story.py` / `app/schemas/story.py`
    - 如果需要开放缓存调试或手动修复入口，补充 `meta` patch 能力
@@ -585,6 +703,11 @@ character_section = character_section_override or build_character_section(charac
 13. `app/services/storyboard.py` / `app/services/story_llm.py`
    - 在上层按“静态前缀在前，动态任务在后”构建 messages
    - 对世界观摘要、系统指令、few-shot 样本等稳定内容接入 Prompt Caching
+
+14. `app/core/story_context.py`（Phase 2.5 增强）
+   - 新增 `extract_character_appearance()` 的 DSPy 适配入口
+   - 新增 `merge_retry_feedback()` 或等价逻辑，把 `shot.extra_instructions` 合并进最终 payload
+   - 保证 DSPy / feedback 只是增强器，不改变 `image_prompt` / `final_video_prompt` / `last_frame_prompt` 的 canonical 地位
 
 ### 9.3 本次实施应同步完成的结构重构
 
@@ -951,6 +1074,16 @@ Phase 1 的补充要求：
 15. 可选新增 `Shot.characters_in_shot`
 16. 可选新增 `extract_scene_styles_from_world_summary()`
 
+### Phase 2.5：DSPy 与闭环质检
+
+17. 将 `extract_character_appearance()` 从硬编码 prompt 演进为 DSPy `Signature` + `TypedPredictor`
+18. 以 `CharacterLock(body_features/default_clothing/negative_prompt)` 为目标结构，统一 `meta["character_appearance_cache"]` 的落盘格式
+19. DSPy 只在开发/离线环境编译，生产环境加载已编译的模块或配置，不在 FastAPI 请求链路中实时编译
+20. 增加少量黄金样本集，用于外貌提取稳定性评估与回归测试
+21. 在 `PipelineExecutor` 的图片/视频生成节点增加可选 VLM 质检器，对“新角色登场 / 大跨度换装 / 抽检镜头”执行一致性检查
+22. 质检失败时，不直接覆盖原 prompt，而是将反馈写入 `shot.extra_instructions` 或等价重试字段，最多有限次重试
+23. 反馈闭环必须按 provider 能力与成本做降级，不允许默认对每个镜头全量启用
+
 ---
 
 ## 十四、兼容性说明
@@ -978,6 +1111,7 @@ Phase 1 的补充要求：
 4. 保持 `image_prompt` / `final_video_prompt` / `last_frame_prompt` 三字段分工，不回退成单一 prompt
 5. 自动与手动链路同时接入 `StoryContext`
 6. 缓存写入与失效通过专用 helper 管理，不直接裸写 `meta`
+7. DSPy 与 Generative Feedback Loops 都应挂在 `story_context.py` / `PipelineExecutor` 这两个稳定边界上，而不是重新把逻辑散落回各 router / provider
 7. Prompt Caching 在“静态前缀已稳定”后再接入，并始终保留“不支持即降级”的 provider 兼容路径
 8. 不把 negative 自动正向改写、模型专属权重语法写入主方案，只保留为 provider 定向优化的可选项
 9. 该方案实施时同步完成最小必要的模块化重构，不采用“功能先打补丁、结构以后再收拾”的路径

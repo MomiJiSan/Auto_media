@@ -107,14 +107,18 @@ async def api_refine(req: RefineRequest, llm: dict = Depends(llm_config_dep), db
 @router.post("/patch")
 async def api_patch(req: PatchStoryRequest, db: AsyncSession = Depends(get_db)):
     fields = {}
+    invalidate_appearance = False
     if req.characters is not None:
         fields["characters"] = req.characters
+        invalidate_appearance = True
     if req.outline is not None:
         fields["outline"] = req.outline
     if req.art_style is not None:
         fields["art_style"] = req.art_style
     if fields:
         await repo.save_story(db, req.story_id, fields)
+    if invalidate_appearance:
+        await repo.invalidate_story_consistency_cache(db, req.story_id, appearance=True)
     return {"ok": True}
 
 

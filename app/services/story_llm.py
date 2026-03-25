@@ -77,6 +77,8 @@ async def refine(story_id: str, change_type: str, change_summary: str, db: Async
         updates["meta"] = {**existing_meta, "theme": data["meta_theme"]}
     if updates:
         await repo.save_story(db, story_id, updates)
+        if "characters" in updates:
+            await repo.invalidate_story_consistency_cache(db, story_id, appearance=True)
 
     return {
         "characters": data.get("characters"),
@@ -138,6 +140,7 @@ async def generate_outline(story_id: str, selected_setting: str, db: AsyncSessio
         "relationships": data.get("relationships", []),
         "outline": data.get("outline", []),
     })
+    await repo.invalidate_story_consistency_cache(db, story_id, appearance=True, scene_style=True)
     return {
         "story_id": story_id,
         **data,
@@ -256,6 +259,8 @@ async def world_building_turn(story_id: str, answer: str, db: AsyncSession, api_
     if data.get("status") == "complete":
         updates["selected_setting"] = data.get("world_summary", "")
     await repo.save_story(db, story_id, updates)
+    if data.get("status") == "complete":
+        await repo.invalidate_story_consistency_cache(db, story_id, scene_style=True)
     usage = resp.usage
     return {
         "story_id": story_id,
@@ -299,6 +304,7 @@ async def apply_chat(story_id: str, change_type: str, chat_history: list, curren
                 break
         if characters:
             await repo.save_story(db, story_id, {"characters": characters})
+            await repo.invalidate_story_consistency_cache(db, story_id, appearance=True)
     else:
         outline = list(story.get("outline") or [])
         for ep in outline:
@@ -310,4 +316,3 @@ async def apply_chat(story_id: str, change_type: str, chat_history: list, curren
             await repo.save_story(db, story_id, {"outline": outline})
 
     return data
-

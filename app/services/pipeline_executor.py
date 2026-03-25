@@ -10,7 +10,9 @@ from app.schemas.pipeline import GenerationStrategy, PipelineStatus
 from app.services import tts, image, video, ffmpeg
 from app.services.storyboard import parse_script_to_storyboard
 from app.services import story_repository as repo
+from app.core.story_context import StoryContext, build_generation_payload
 from app.core.api_keys import inject_art_style
+from app.services.story_context_service import prepare_story_context
 
 
 class PipelineExecutor:
@@ -25,6 +27,7 @@ class PipelineExecutor:
         self.base_url: str = ""
         self.character_info: Optional[dict] = None
         self.art_style: str = ""
+        self.story_context: Optional[StoryContext] = None
 
     async def run_full_pipeline(
         self,
@@ -45,11 +48,22 @@ class PipelineExecutor:
         video_provider: str = "dashscope",
         character_info: Optional[dict] = None,
         art_style: str = "",
+        story_id: Optional[str] = None,
     ):
         """执行完整的生成流水线"""
         self.base_url = base_url
         self.character_info = character_info
         self.art_style = art_style
+        self.story_context = None
+        if story_id:
+            _, self.story_context = await prepare_story_context(
+                self.db,
+                story_id,
+                provider=provider,
+                model=model or "",
+                api_key=llm_api_key,
+                base_url=llm_base_url,
+            )
         try:
             # Step 1: 分镜解析
             await self._update_state(
@@ -61,6 +75,7 @@ class PipelineExecutor:
             self.shots, _ = await parse_script_to_storyboard(
                 script, provider, model, api_key=llm_api_key, base_url=llm_base_url,
                 character_info=character_info,
+                character_section_override=self.story_context.clean_character_section if self.story_context else None,
             )
 
             if not self.shots:
@@ -158,7 +173,7 @@ class PipelineExecutor:
         )
 
         image_results = await image.generate_images_batch(
-            shots=[self._build_image_prompts(s, self.character_info) for s in self.shots],
+            shots=[self._build_generation_payload(s) for s in self.shots],
             model=image_model,
             image_api_key=image_api_key,
             image_base_url=image_base_url,
@@ -183,17 +198,23 @@ class PipelineExecutor:
             {"step": "video", "current": 0, "total": total, "message": "正在生成视频..."},
         )
 
-        video_results = await video.generate_videos_batch(
-            shots=[
+        video_shots = []
+        for shot in self.shots:
+            if shot.shot_id not in image_map:
+                continue
+            payload = self._build_generation_payload(shot)
+            video_shots.append(
                 {
-                    "shot_id": s.shot_id,
-                    "image_url": image_map[s.shot_id]["image_url"],
-                    "final_video_prompt": self._build_video_prompt(s, self.character_info),
-                    "last_frame_url": image_map[s.shot_id].get("last_frame_url"),
+                    "shot_id": shot.shot_id,
+                    "image_url": image_map[shot.shot_id]["image_url"],
+                    "final_video_prompt": payload["final_video_prompt"],
+                    "last_frame_url": image_map[shot.shot_id].get("last_frame_url"),
+                    "negative_prompt": payload.get("negative_prompt", ""),
                 }
-                for s in self.shots
-                if s.shot_id in image_map
-            ],
+            )
+
+        video_results = await video.generate_videos_batch(
+            shots=video_shots,
             base_url=base_url,
             model=video_model,
             video_api_key=video_api_key,
@@ -286,6 +307,26 @@ class PipelineExecutor:
             character_info,
         )
 
+    def _build_generation_payload(self, shot: Shot) -> dict:
+        payload = build_generation_payload(shot, self.story_context, art_style=self.art_style)
+        if self.story_context:
+            return payload
+
+        # Fallback for legacy no-story-id flows. Keep the old enhancement path available
+        # until all entry points consistently pass through StoryContext.
+        legacy_payload = self._build_image_prompts(shot, self.character_info)
+        legacy_payload["image_prompt"] = inject_art_style(legacy_payload["image_prompt"], self.art_style)
+        if legacy_payload.get("last_frame_prompt"):
+            legacy_payload["last_frame_prompt"] = inject_art_style(
+                legacy_payload["last_frame_prompt"],
+                self.art_style,
+            )
+        legacy_payload["final_video_prompt"] = inject_art_style(
+            self._build_video_prompt(shot, self.character_info),
+            self.art_style,
+        )
+        return legacy_payload
+
     async def _run_chained_strategy(
         self,
         voice: str,
@@ -340,18 +381,7 @@ class PipelineExecutor:
         # 构建 shots 数据并增强 prompt
         shots_data = []
         for s in self.shots:
-            prompt_data = self._build_image_prompts(s, self.character_info)
-            prompt_data["image_prompt"] = inject_art_style(prompt_data["image_prompt"], self.art_style)
-            if prompt_data.get("last_frame_prompt"):
-                prompt_data["last_frame_prompt"] = inject_art_style(
-                    prompt_data["last_frame_prompt"],
-                    self.art_style,
-                )
-            prompt_data["final_video_prompt"] = inject_art_style(
-                self._build_video_prompt(s, self.character_info),
-                self.art_style,
-            )
-            shots_data.append(prompt_data)
+            shots_data.append(self._build_generation_payload(s))
 
         scene_groups = video.group_shots_by_scene(shots_data)
         scene_names = list(scene_groups.keys())
@@ -429,7 +459,7 @@ class PipelineExecutor:
         )
 
         image_results = await image.generate_images_batch(
-            shots=[self._build_image_prompts(s, self.character_info) for s in self.shots],
+            shots=[self._build_generation_payload(s) for s in self.shots],
             model=image_model,
             image_api_key=image_api_key,
             image_base_url=image_base_url,
@@ -456,17 +486,23 @@ class PipelineExecutor:
 
         # TODO: 调用支持视频语音一体生成的 API
         # 目前先复用现有的图生视频接口
-        video_results = await video.generate_videos_batch(
-            shots=[
+        video_shots = []
+        for shot in self.shots:
+            if shot.shot_id not in image_map:
+                continue
+            payload = self._build_generation_payload(shot)
+            video_shots.append(
                 {
-                    "shot_id": s.shot_id,
-                    "image_url": image_map[s.shot_id]["image_url"],
-                    "final_video_prompt": self._build_video_prompt(s, self.character_info),
-                    "last_frame_url": image_map[s.shot_id].get("last_frame_url"),
+                    "shot_id": shot.shot_id,
+                    "image_url": image_map[shot.shot_id]["image_url"],
+                    "final_video_prompt": payload["final_video_prompt"],
+                    "last_frame_url": image_map[shot.shot_id].get("last_frame_url"),
+                    "negative_prompt": payload.get("negative_prompt", ""),
                 }
-                for s in self.shots
-                if s.shot_id in image_map
-            ],
+            )
+
+        video_results = await video.generate_videos_batch(
+            shots=video_shots,
             base_url=base_url,
             model=video_model,
             video_api_key=video_api_key,

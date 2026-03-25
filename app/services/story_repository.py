@@ -1,9 +1,11 @@
 """Story 和 Pipeline 数据库操作抽象层"""
+import asyncio
 import json as _json
 from typing import List, Optional, Dict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, text
 from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.exc import OperationalError
 from app.models.story import Story, Pipeline
 from app.schemas.pipeline import PipelineStatus
 
@@ -124,6 +126,89 @@ async def upsert_character_images(
         if result.rowcount == 0:
             raise ValueError(f"Story {story_id} not found")
     await db.commit()
+
+
+async def _execute_with_sqlite_retry(
+    db: AsyncSession,
+    statement,
+    params: dict,
+    *,
+    retries: int = 3,
+    base_delay: float = 0.05,
+):
+    for attempt in range(retries):
+        try:
+            return await db.execute(statement, params)
+        except OperationalError as exc:
+            if "database is locked" not in str(exc).lower() or attempt == retries - 1:
+                raise
+            await db.rollback()
+            await asyncio.sleep(base_delay * (attempt + 1))
+
+
+async def upsert_story_meta_cache(
+    db: AsyncSession,
+    story_id: str,
+    key: str,
+    value,
+    *,
+    retries: int = 3,
+) -> None:
+    result = await _execute_with_sqlite_retry(
+        db,
+        text(
+            "UPDATE stories "
+            "SET meta = json_set(COALESCE(meta, '{}'), :path, json(:value)) "
+            "WHERE id = :story_id"
+        ),
+        {"path": f"$.{key}", "value": _json.dumps(value), "story_id": story_id},
+        retries=retries,
+    )
+    if result.rowcount == 0:
+        raise ValueError(f"Story {story_id} not found")
+    await db.commit()
+
+
+async def remove_story_meta_keys(
+    db: AsyncSession,
+    story_id: str,
+    keys: list[str],
+    *,
+    retries: int = 3,
+) -> None:
+    if not keys:
+        return
+    for key in keys:
+        result = await _execute_with_sqlite_retry(
+            db,
+            text(
+                "UPDATE stories "
+                "SET meta = json_remove(COALESCE(meta, '{}'), :path) "
+                "WHERE id = :story_id"
+            ),
+            {"path": f"$.{key}", "story_id": story_id},
+            retries=retries,
+        )
+        if result.rowcount == 0:
+            raise ValueError(f"Story {story_id} not found")
+    await db.commit()
+
+
+async def invalidate_story_consistency_cache(
+    db: AsyncSession,
+    story_id: str,
+    *,
+    appearance: bool = False,
+    scene_style: bool = False,
+    retries: int = 3,
+) -> None:
+    keys = []
+    if appearance:
+        keys.append("character_appearance_cache")
+    if scene_style:
+        keys.append("scene_style_cache")
+    if keys:
+        await remove_story_meta_keys(db, story_id, keys, retries=retries)
 
 
 # ============ Pipeline Repository ============

@@ -1,56 +1,314 @@
-# 主流程接入过渡分镜说明
+# 主流程接入过渡视频说明
 
-> 目标：把“过渡分镜”真正接进当前自动生成主流程，而不是只停留在设计文档里。
-> 当前确认方案：第一版采用“手动确认生成过渡视频”，不是让 LLM 在 storyboard 阶段直接输出全部过渡分镜。
-> 适用范围：`PipelineExecutor` 主流程、链式/普通视频生成、前端交互、过渡视频接口。
-> 推荐首期范围：仅在 `doubao` provider 下完整启用双帧过渡；其他 provider 先兼容字段、允许降级。
-
----
-
-## 1. 当前主流程现状
-
-当前自动主流程入口在 `app/services/pipeline_executor.py`：
-
-- `separated`
-  - 分镜 -> TTS -> 生图 -> 图生视频 -> FFmpeg 合成
-- `integrated`
-  - 分镜 -> 生图 -> 视频生成
-- `chained`
-  - 分镜 -> TTS -> 场景内链式生成
-  - 同场景内：上一镜头视频最后一帧，作为下一镜头首帧参考
-
-当前已经具备两块基础能力：
-
-1. `Shot` 已支持：
-   - `image_prompt`
-   - `final_video_prompt`
-   - `last_frame_prompt`
-   - `last_frame_url`
-2. Doubao provider 已支持首尾帧双帧视频生成：
-   - `first_frame`
-   - `last_frame`
-
-但现在还没有真正落地“手动确认式过渡视频”这件事：
-
-- 前端没有在两个相邻镜头之间提供“生成过渡视频”按钮
-- 后端没有独立的“过渡视频生成”接口
-- 主流程结果里没有“主镜头 + 手动补充过渡视频”的统一顺序管理
-- 过渡视频还没有被视为一种运行时新增资产
-
-一句话说，当前系统只有“镜头连续性增强”，还没有“用户确认后插入过渡片段”的主流程能力。
+> 目标：基于项目当前实现，继续优化“过渡片段”接入主流程的设计文档。
+> 当前结论：项目已经具备“首尾帧能力”和“链式连续性能力”，但还没有真正落地“运行时手动插入过渡视频”的完整链路。
+> 当前迭代范围：先只落前端 UI 展示；后端接口、运行时资产结构、拼接逻辑本轮暂不实施。
+> 推荐首期：先把交互入口和展示位置稳定下来，再进入后端接入。
 
 ---
 
-## 2. 目标效果
+## 1. 当前项目真实现状
 
-接入后，主流程默认仍然只生成主镜头：
+这次优化文档时，需要先明确：项目不是“完全没有过渡基础能力”，而是“基础能力已具备，但主流程集成还没闭环”。
+
+### 1.1 已有能力
+
+当前后端已经具备以下基础：
+
+1. `Shot` schema 已支持过渡相关字段
+   - 文件：`app/schemas/storyboard.py`
+   - 已有字段：
+     - `image_prompt`
+     - `final_video_prompt`
+     - `last_frame_prompt`
+     - `last_frame_url`
+     - `transition_from_previous`
+
+2. 图片生成层已支持尾帧图片生成
+   - 文件：`app/services/image.py`
+   - `generate_images_batch()` 在 shot 带有 `last_frame_prompt` 时，会额外生成 `${shot_id}_lastframe` 图片，并返回 `last_frame_url`
+
+3. 视频生成层已支持双帧接口参数
+   - 文件：`app/services/video.py`
+   - `generate_video()` 和 `generate_videos_batch()` 已支持 `last_frame_url`
+
+4. Provider 层已经区分“双帧支持”和“仅兼容字段”
+   - `doubao`：真实支持首尾帧
+   - `kling` / `minimax`：当前保留 `last_frame_url` 参数，但实际忽略
+   - 这和现有文档 `docs/FIRST_LAST_FRAME_UPDATE_SUMMARY.md`、`docs/FIRST_LAST_FRAME_USAGE_GUIDE.md` 的结论一致
+
+5. 主流程三种策略已经接入首尾帧相关字段
+   - 文件：`app/services/pipeline_executor.py`
+   - `separated` / `integrated`：会把图片阶段产出的 `last_frame_url` 继续传给视频生成阶段
+   - `chained`：已经有“场景内串行生成 + 提取上一镜头最后一帧给下一镜头复用”的能力
+
+### 1.2 现在还缺什么
+
+当前项目真正缺的不是“首尾帧 API 能力”，而是以下主流程能力：
+
+1. 没有独立的“过渡视频生成接口”
+   - `app/routers/pipeline.py` 目前只有主流程、storyboard、concat 等接口
+   - 没有 `transition generate` 之类的独立入口
+
+2. 没有运行时过渡资产模型
+   - `app/schemas/pipeline.py` 目前只有 `ShotResult`
+   - 没有 `TransitionResult` / `TransitionRequest` 之类的结构
+
+3. 前端没有“在两个镜头之间插入过渡片段”的交互
+   - 文件：`frontend/src/views/VideoGeneration.vue`
+   - 当前是逐个 shot 生成图片、视频，再整体拼接
+   - 还没有“两个相邻 shot card 之间显示一个生成过渡按钮”的展示层
+
+4. 拼接顺序还只认 shot 本身
+   - 当前 `concatAllVideos()` 直接按 `shot_id` 排序后拼接
+   - 还没有“shot + transition + shot”的统一顺序源
+
+一句话总结：
+
+当前系统已经有“镜头连续性增强能力”，但还没有“用户手动生成并插入过渡片段”的主流程闭环。
+
+---
+
+## 2. 这份文档要解决的问题
+
+第一阶段不是去改 LLM，让它输出 `scene1_trans1`、`scene2_trans3` 这种完整过渡分镜。
+
+完整方案的第一阶段原本要做的是：
+
+1. 主镜头照旧由 storyboard 输出
+2. 主流程照旧生成主镜头图片和视频
+3. 当两个相邻主镜头视频都准备好后
+4. 前端允许用户手动触发一次“过渡视频生成”
+5. 后端基于：
+   - 前镜头结尾状态
+   - 后镜头开头状态
+   - 可选补充 prompt
+   生成一个独立过渡片段
+6. 前端把这个片段插入两镜头之间展示和拼接
+
+但就当前迭代来说，范围进一步收缩为：
+
+1. 前端先展示相邻镜头之间的 transition slot
+2. 只呈现“可生成 / 待就绪”的状态文案
+3. 暂不发起后端请求
+4. 暂不改动 concat / pipeline / schema
+
+这样可以先验证 UI 位置、交互节奏和信息密度，再进入后端实现。
+
+---
+
+## 3. 和现有三种策略的关系
+
+### 3.1 separated
+
+当前路径：
 
 ```text
-scene1_shot1 -> scene1_shot2 -> scene1_shot3
-scene2_shot1 -> scene2_shot2 -> scene2_shot3
+storyboard -> TTS -> image -> video -> ffmpeg stitch
 ```
 
-当相邻两个主镜头都已经完成视频生成后，前端在它们中间显示一个按钮：
+特点：
+
+- 已支持 `last_frame_prompt -> last_frame_url -> last_frame_url 传给视频层`
+- 适合先落地“手动生成额外过渡片段”
+- 因为每个 shot 的 image/video 资产都比较清晰，最容易在 UI 层中间插一个 transition
+
+### 3.2 integrated
+
+当前路径：
+
+```text
+storyboard -> image -> video
+```
+
+特点：
+
+- 当前实现仍然是“先生成图片，再复用现有图生视频接口”
+- 也支持 `last_frame_url`
+- 但因为没有单独音频合成环节，过渡片段更适合作为“纯视频片段”插入
+
+### 3.3 chained
+
+当前路径：
+
+```text
+storyboard -> TTS -> scene 内串行视频生成 -> extract_last_frame -> 下一镜头复用
+```
+
+特点：
+
+- `app/services/video.py` 中的 `generate_videos_chained()` 已经会：
+  - 场景首镜头独立生图
+  - 后续镜头复用上一镜头最后一帧
+  - 对每个生成好的视频提取最后一帧
+- 这解决的是“场景内镜头连续性”
+- 它并不等于“独立过渡片段”
+
+因此要明确区分：
+
+- `chained`：让后一个主镜头更像前一个主镜头的延续
+- `transition asset`：在两个主镜头之间额外插入一个可单独重试、可单独删除的片段
+
+---
+
+## 4. 第一阶段推荐方案
+
+### 4.1 不改 storyboard 主结构
+
+第一阶段不要要求 LLM 输出专门的过渡镜头。
+
+保持现状即可：
+
+- `Shot` 继续作为主镜头 schema
+- `transition_from_previous` 继续只承担“叙事/视觉衔接说明”
+- `last_frame_prompt` 继续只承担“结束状态控制”
+
+原因：
+
+1. 当前 `app/prompts/storyboard.py` 已经比较复杂
+2. 项目已经在 `last_frame_prompt` 路径上有实现基础
+3. 如果一上来就让 LLM 输出大量过渡镜头，会明显增加 shot 数量、TTS 数量、生成时长和 UI 复杂度
+
+### 4.2 新增“运行时过渡资产”而不是“分镜内过渡镜头”
+
+推荐把过渡视频定义为运行时新增资源，例如：
+
+```json
+{
+  "transition_id": "transition_scene1_shot1__scene1_shot2",
+  "from_shot_id": "scene1_shot1",
+  "to_shot_id": "scene1_shot2",
+  "prompt": "Smooth transition that carries pose, identity, clothing, lighting, and camera continuity into the next shot.",
+  "video_url": "/media/videos/transition_scene1_shot1__scene1_shot2.mp4"
+}
+```
+
+这样做的好处：
+
+1. 不污染原始 storyboard
+2. 可以单独失败、单独重试
+3. 不影响已经生成完成的主镜头
+4. 后续可以删除某个 transition，而不需要回滚整条 pipeline
+
+---
+
+## 5. 后端接入设计（本轮仅更新文档，不落代码）
+
+### 5.1 后端
+
+建议关注以下文件：
+
+- `app/services/video.py`
+- `app/services/ffmpeg.py`
+- `app/routers/pipeline.py`
+- `app/schemas/pipeline.py`
+
+注意：
+
+- 本节内容当前仅作为后续实现设计保留
+- 本轮不新增接口
+- 本轮不修改 schema
+- 本轮不改 `video.py` / `pipeline.py` / `ffmpeg.py`
+
+后续推荐增加的后端能力：
+
+1. 请求结构
+
+```python
+class TransitionGenerateRequest(BaseModel):
+    from_shot_id: str
+    to_shot_id: str
+    from_video_url: str
+    to_image_url: str | None = None
+    to_video_url: str | None = None
+    transition_prompt: str | None = None
+```
+
+2. 返回结构
+
+```python
+class TransitionResult(BaseModel):
+    transition_id: str
+    from_shot_id: str
+    to_shot_id: str
+    prompt: str | None = None
+    video_url: str
+```
+
+3. 独立服务方法
+
+```python
+async def generate_transition_video(...):
+    ...
+```
+
+### 5.2 后续生成逻辑
+
+等前端 UI 方案确认稳定后，第一版后端建议逻辑如下：
+
+1. 把 `from_video_url` 转成本地文件路径
+2. 从前一个视频提取最后一帧
+3. 取后一个镜头的首帧图作为目标尾帧
+   - 优先 `to_image_url`
+   - 如果没有，再考虑从 `to_video_url` 提取第一帧
+4. 如果 provider 支持双帧：
+   - `first_frame = 前镜尾帧`
+   - `last_frame = 后镜首帧`
+5. 如果 provider 不支持双帧：
+   - 退化为单帧 I2V
+   - prompt 中保留“向下一镜头自然过渡”的描述
+
+这里可以直接复用当前已有的 `extract_last_frame()` 能力，不需要先重构整条链式策略。
+
+但这部分目前仍停留在设计层，不属于本轮改动。
+
+### 5.3 后续 Provider 策略
+
+基于当前真实实现，推荐写死以下判断：
+
+```python
+supports_dual_frame = video_provider == "doubao"
+```
+
+原因：
+
+- 这是和项目当前 provider 实现一致的最稳方案
+- `kling` / `minimax` 目前虽然接受 `last_frame_url` 参数，但实际不会按双帧模式工作
+- 文档不应该对未实现能力做过度承诺
+
+当前文档口径应明确为：
+
+- `doubao` 是未来后端接入时的首选双帧 provider
+- 但当前前端 UI 版不会真正调用任何 provider
+
+---
+
+## 6. 前端应该如何接入
+
+主要修改文件：
+
+- `frontend/src/views/VideoGeneration.vue`
+- 如有需要，再补 `frontend/src/api/story.js`
+
+### 6.1 当前前端实际情况
+
+`VideoGeneration.vue` 当前已经支持：
+
+1. 单个 shot 生成 TTS
+2. 单个 shot 生成图片
+3. 单个 shot 生成视频
+4. 汇总所有 `shot.video_url` 进行拼接
+
+但还没有：
+
+1. 邻接镜头之间的插槽 UI
+2. transition loading/error 状态
+3. transition 结果缓存
+4. 按“主镜头 + 过渡片段”输出最终拼接顺序
+
+### 6.2 当前 UI 版建议
+
+在两个相邻镜头之间增加一个轻量插槽：
 
 ```text
 [scene1_shot1]
@@ -60,323 +318,128 @@ scene2_shot1 -> scene2_shot2 -> scene2_shot3
 [scene1_shot2]
 ```
 
-用户点击后，系统为这一对相邻镜头生成一个运行时过渡片段，最终播放顺序变成：
+按钮显示条件：
+
+1. 这两个 shot 在当前 storyboard 顺序中相邻
+2. `fromShot.video_url` 已存在
+3. `toShot.video_url` 已存在，或至少 `toShot.image_url` 已存在
+4. 当前这对 shot 之间还没有 transition 结果
+
+当前按钮点击后：
+
+1. 仅显示“后端暂未接入”的提示
+2. 不发起 transition generate 请求
+3. 不写入 transition 结果
+4. 只保留后续真实接入的位置感和状态感
+
+### 6.3 拼接逻辑要改
+
+当前 `concatAllVideos()` 是：
 
 ```text
-scene1_shot1 -> transition(scene1_shot1, scene1_shot2) -> scene1_shot2
+shots.filter(video_url).sort(shot_id)
 ```
 
-其中：
+这对 transition 来说不够。
 
-- 主镜头仍来自原 storyboard
-- 过渡视频不是 storyboard 固定输出，而是用户在 UI 中手动确认后新增的运行时片段
-- 过渡视频只存在于两个相邻主镜头之间
+完整接入后应该改成：
 
----
+1. 以 storyboard 原始 shot 顺序为准
+2. 遍历 shot 列表
+3. 每输出一个主 shot 后，检查它和下一个 shot 之间是否存在 transition
+4. 如果存在，把 transition 的 `video_url` 插进去
+5. 最后把这个线性列表传给 concat 接口
 
-## 3. 推荐接入策略
+也就是说，最终拼接顺序来源不应该只是 `shot_id` 排序，而应该是“显示顺序”。
 
-不要一开始就改成“LLM 自动产出过渡分镜”。推荐先做手动确认版。
-
-### Phase 1
-
-做“手动确认生成过渡视频”：
-
-原因：
-
-- 不改 storyboard 主结构，风险最低
-- 用户可以只在必要的位置生成过渡，不会把片段数量炸开
-- 更适合人工判断“哪里真的需要过渡”
-- 最容易接入 Doubao 的双帧能力
-
-### Phase 2
-
-如果手动版稳定，再增加“自动推荐哪些位置适合生成过渡视频”。
-
-### Phase 3
-
-最后再考虑让 LLM 在 storyboard 中直接输出过渡分镜。
+但当前前端 UI 版暂不修改拼接逻辑，仍保持现状。
 
 ---
 
-## 4. 主流程应该怎么改
-
-### 4.1 分镜层：第一版不要强依赖 LLM 输出过渡分镜
-
-第一版建议保持 storyboard 基本不变：
-
-- 仍然只生成主镜头
-- 不要求 LLM 输出 `scene*_trans*`
-- 不要求 `Shot` 里立即加入完整过渡分镜 schema
-
-原因：
-
-- 这次的目标是“主流程中人工确认补过渡”
-- 不是“重做一版自动过渡 storyboard”
-- 先把运行时资产链路打通，比先改 LLM prompt 更重要
-
-第一版最多只需要增加一个轻量的运行时结构，例如：
-
-```python
-class TransitionRequest(BaseModel):
-    from_shot_id: str
-    to_shot_id: str
-    transition_prompt: Optional[str] = None
-```
-
-这里的 `transition_prompt` 可以先由系统自动生成，也可以允许前端人工微调。
-
----
-
-### 4.2 执行层：主流程要支持“相邻镜头生成完成后，补一个过渡视频”
-
-需要修改：
-
-- `app/services/pipeline_executor.py`
-- `app/services/video.py`
-- `app/routers/pipeline.py`
-- `frontend/src/views/VideoGeneration.vue`
-
-当前主流程的问题不是“不会自动拆主镜和过渡镜”，而是“生成完成后没有补一个过渡片段的入口”。
-
-所以第一版建议这样做：
-
-#### Step A：主流程照旧生成主镜头
-
-- 仍然按原 storyboard 生成主镜头图片和视频
-- 不改变现有 `separated` / `integrated` / `chained` 的主逻辑
-
-#### Step B：当两个相邻主镜头都具备 `video_url` 时，在 UI 中间显示按钮
-
-按钮出现条件：
-
-- 两个镜头在 storyboard 顺序上相邻
-- 前一个镜头已有 `video_url`
-- 后一个镜头已有 `video_url`
-- 当前这对镜头之间还没有过渡视频
-
-按钮位置：
-
-- 渲染在两个 shot card 之间
-- 文案建议为 `生成过渡视频`
-
-#### Step C：点击按钮后，请求后端生成过渡视频
-
-后端应接收：
-
-- `from_shot_id`
-- `to_shot_id`
-- `from_video_url`
-- `to_image_url` 或 `to_video_url`
-- 可选 `transition_prompt`
-
-目的：
-
-- 让过渡视频成为一种独立、可追加、可重试的资产
-- 不影响已生成好的主镜头
-- 失败时只重试这一个过渡，不重跑整条流水线
-
-#### Step D：生成完成后，将过渡视频插入播放顺序
-
-可以在运行时结果中记录为：
-
-```python
-{
-    "transition_id": "transition_scene1_shot1__scene1_shot2",
-    "from_shot_id": "scene1_shot1",
-    "to_shot_id": "scene1_shot2",
-    "video_url": "/media/videos/transition_scene1_shot1__scene1_shot2.mp4"
-}
-```
-
-前端展示时，将它插入两个 shot 中间。
-
----
-
-### 4.3 视频层：新增“过渡视频生成”能力，不要先重构整条链式流程
-
-需要修改：
-
-- `app/services/video.py`
-- `app/services/ffmpeg.py`
-
-第一版最稳的做法不是改 `generate_videos_chained()` 本体，而是增加一个新的方法，例如：
-
-```python
-async def generate_transition_video(
-    from_video_path: str,
-    to_image_url: str,
-    transition_id: str,
-    prompt: str,
-    ...
-) -> dict:
-    ...
-```
-
-推荐生成方式：
-
-1. 从前一个镜头视频提取最后一帧
-2. 取后一个镜头的首帧图作为目标尾帧
-3. 如果 provider 支持双帧：
-   - 首帧 = 前镜尾帧
-   - 尾帧 = 后镜首帧
-4. 如果 provider 不支持双帧：
-   - 退化成以前镜尾帧为首帧的单帧 I2V
-   - prompt 中增加“过渡到下一个构图”的提示
-
-如果后续验证效果很好，再考虑把它并回 `generate_videos_chained()`。
-
----
-
-### 4.4 Provider 层：首期只对 Doubao 真正启用双帧过渡
-
-当前 provider 情况：
-
-- `doubao`
-  - 已支持 `last_frame_url`
-- `dashscope`
-  - 仅接口兼容，实际忽略
-- `kling`
-  - 仅接口兼容，实际忽略
-- `minimax`
-  - 仅接口兼容，实际忽略
-
-所以这条“手动确认生成过渡视频”的链路，建议这样处理：
-
-- 如果 `video_provider == "doubao"`：
-  - 过渡视频使用双帧模式
-- 否则：
-  - 降级为单帧 I2V
-  - 仍可使用 transition prompt
-  - 但不要承诺精确的起止姿态
-
-也就是说，主流程里要显式写清楚：
-
-```python
-supports_dual_frame = video_provider == "doubao"
-```
-
-然后按 provider 决定是否传 `last_frame_url`。
-
----
-
-## 5. 手动确认版过渡视频的主流程时序
-
-推荐主流程时序如下：
+## 7. 当前时序与后续时序
 
 ```text
-Step 1: LLM 生成普通 storyboard
-Step 2: 主流程生成主镜头图片和视频
-Step 3: 前端检查相邻镜头是否都已有 video_url
-Step 4: 在合适位置显示“生成过渡视频”按钮
-Step 5: 用户点击按钮，提交 transition generate 请求
-Step 6: 后端提取前镜尾帧，并读取后镜首帧
-Step 7: 调用 provider 生成过渡视频
-Step 8: 将 transition asset 插入两个镜头之间展示与拼接
-```
+当前时序：
+Step 1: storyboard 只生成主镜头
+Step 2: 主流程照常生成主镜头 image/video
+Step 3: 前端检查相邻镜头是否满足展示条件
+Step 4: 在两个主镜头之间显示 transition slot
+Step 5: 用户点击按钮时，仅提示“后端暂未接入”
 
----
-
-## 6. 前端和接口需要配合的点
-
-需要关注：
-
-- `frontend/src/views/VideoGeneration.vue`
-- `app/schemas/pipeline.py`
-
-建议增加的前端行为：
-
-1. 在两个相邻 shot card 之间渲染插槽
-   - 如果两边都已有 `video_url` 且尚未生成过渡视频，显示按钮
-   - 按钮文案：`生成过渡视频`
-
-2. 点击按钮后的请求参数
-   - `from_shot_id`
-   - `to_shot_id`
-   - 可选 `transition_prompt`
-
-3. 成功后前端保存 transition 结果
-   - `transition_id`
-   - `from_shot_id`
-   - `to_shot_id`
-   - `video_url`
-
-4. 结果排序
-   - 必须按 storyboard 原顺序展示和拼接
-   - transition 结果展示在 `from_shot` 和 `to_shot` 之间
-
-5. 重试能力
-   - 单个过渡视频失败时，可单独重试
-   - 不影响已有主镜头
-
----
-
-## 7. 建议的数据样例
-
-```json
-{
-  "transition_id": "transition_scene1_shot1__scene1_shot2",
-  "from_shot_id": "scene1_shot1",
-  "to_shot_id": "scene1_shot2",
-  "prompt": "Smoothly transition from the previous ending pose into the next framing, keeping identity, clothing, and lighting consistent.",
-  "video_url": "/media/videos/transition_scene1_shot1__scene1_shot2.mp4"
-}
+后续完整时序：
+Step 6: 新增 transition generate 接口
+Step 7: 后端提取前镜尾帧，并获取后镜首帧
+Step 8: 调用视频 provider 生成独立过渡片段
+Step 9: 前端将 transition card 插入两个主镜头之间
+Step 10: concat 时按显示顺序拼接主镜头和 transition 片段
 ```
 
 ---
 
 ## 8. 第一阶段最小实现清单
 
-如果只做“能跑起来的第一版”，建议只做下面这些：
+如果目标是“和当前代码改动保持一致”，本轮范围应控制在以下几项：
 
-1. 前端在两个相邻镜头之间显示“生成过渡视频”按钮
-2. 后端新增独立的 transition generate 接口
-3. `video.py` 增加 `generate_transition_video()` 方法
-4. `ffmpeg.py` 增加“提取前镜尾帧”复用逻辑
-5. 仅在 `doubao` 下为过渡视频传 `last_frame_url`
-6. 前端把 transition 结果插入两个镜头之间展示
-7. 过渡视频支持单独重试和删除
+1. 前端在相邻 shot card 之间显示 transition slot
+2. 根据前后镜头素材状态显示“可生成 / 待就绪”
+3. 点击按钮仅提示“后端暂未接入”
+4. 不新增后端接口
+5. 不新增运行时 transition schema
+6. 不修改 concat 排序逻辑
+7. 保留后端设计说明，等待下一阶段实现
 
-这 7 项做完，就已经是可交互、可验证、风险较低的主流程版本。
+这 7 项做完，就是一个边界清晰的 UI 预演版本。
 
 ---
 
 ## 9. 验收标准
 
-接入完成后，至少满足下面几个标准：
+当前这版文档对应的验收标准，至少要满足：
 
-1. storyboard 仍能稳定输出原有主镜头，不因过渡能力接入而被破坏
-2. 相邻两个主镜头都生成完成后，前端能在中间显示按钮
-3. 点击按钮后，后端能基于前镜尾帧和后镜首帧生成过渡视频
-4. `doubao` 下过渡视频可以走双帧模式
-5. 非 Doubao provider 不会报错，只会降级
-6. 最终拼接顺序与 storyboard 顺序完全一致，并正确插入过渡片段
-7. 过渡视频失败时只影响当前按钮对应的片段，不影响主流程已有结果
+1. 现有 storyboard 输出不被破坏
+2. `separated` / `integrated` / `chained` 三种主镜头生成路径不受影响
+3. 相邻镜头之间可以展示 transition slot
+4. slot 能根据前后镜头素材状态显示不同文案
+5. 点击按钮不会触发真实后端请求
+6. 现有视频生成与导出逻辑保持不变
+7. 后端设计在文档中保留，但不会被误读为“本轮已实现”
 
 ---
 
 ## 10. 明确不建议的做法
 
-以下做法不建议直接进入主流程：
+当前阶段不建议：
 
-- 第一版就强依赖 LLM 自动产出完整过渡分镜
-- 先做跨场景桥接，再补相邻镜头过渡
-- 在 `separated`、`integrated`、`chained` 三条策略里同时大改
-- 把过渡 prompt 写成和主镜头一样长的大段描述
-- 不区分 provider，盲目给所有平台传 `last_frame_url`
-
-这些都会让系统复杂度暴涨，但质量不一定提升。
+1. 直接把 LLM 自动过渡分镜作为第一阶段
+2. 把 `transition_from_previous` 误当成独立 transition asset
+3. 把 `chained` 的“连续性增强”误写成“已经支持独立过渡片段”
+4. 在所有 provider 上宣称都支持双帧过渡
+5. 在文档里把后端设计写成“已经进入当前开发范围”
+6. 继续沿用“纯 `shot_id` 排序后拼接”的逻辑来处理未来的 transition，但又不在文档里标注这是后续项
 
 ---
 
 ## 11. 推荐结论
 
-如果要把过渡分镜接进主流程，最稳的实施路径是：
+结合当前项目代码，最合理的文档结论应该是：
 
-- 第一版先不改 storyboard 主结构
-- 先做“相邻镜头生成完成后，手动确认生成过渡视频”的交互
-- 后端用“前镜尾帧 + 后镜首帧”生成过渡片段
-- 首期只对 Doubao 打开双帧过渡
-- 其他 provider 全部按降级逻辑兼容
+1. 项目已经具备首尾帧和链式连续性基础能力
+2. 当前完整缺口仍然是“运行时过渡片段”的接口、状态、展示和排序
+3. 但本轮只推进前端 UI 展示，不推进后端实现
+4. 后端部分只保留设计说明，等待下一阶段接入
+5. 后续真正落后端时，优先只对 `doubao` 开启双帧过渡，其他 provider 做兼容降级
 
-这样改动范围清晰、收益直接，也最符合当前代码结构。
+这样文档范围和当前代码状态是一致的，不会造成“文档已承诺、代码未进入”的落差。
+
+---
+
+## 12. 与 DSPy / Generative Feedback Loops 的关系
+
+后续如果项目引入 DSPy 和 Generative Feedback Loops，这份过渡方案的口径建议保持一致：
+
+1. `transition asset` 不单独发明第三套角色一致性逻辑，继续复用 `StoryContext` / `build_generation_payload()` 的统一角色锁与负面约束
+2. 过渡片段的首尾状态描述，仍优先来自已有的 `last_frame_prompt`、相邻 shot 首帧/尾帧资产，以及运行时补充 prompt，而不是把更多负担压回 storyboard
+3. 如果后续接入 VLM 质检，transition 应只做“关键过渡抽检”，例如人物是否接上、服装是否延续、镜头方向是否冲突，不建议默认对每段过渡都全量重试
+4. 如果后续用 DSPy 结构化提取 `CharacterLock`，transition 生成也只消费结构化结果，不应再次拼接旧式 portrait prompt 大段文本
+
+换句话说，transition 方案应该成为主生成链路的一部分，而不是 DSPy / 反馈闭环之外的旁路系统。

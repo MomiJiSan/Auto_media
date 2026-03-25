@@ -226,56 +226,117 @@
             </button>
           </div>
         </div>
+        <div class="transition-note">
+          过渡视频能力当前仅展示前端 UI。这里先预留相邻镜头之间的插槽和状态文案，暂不调用后端接口，也不会改变现有生成与导出逻辑。
+        </div>
         <div class="shots-grid">
-          <div v-for="shot in shots" :key="shot.shot_id" class="shot-card">
-            <div class="shot-header">
-              <span class="shot-id">{{ shot.shot_id }}</span>
-              <div class="shot-meta">
-                <span class="tag type">{{ shot.camera_setup?.movement || shot.camera_motion }}</span>
-                <span class="tag">{{ shot.estimated_duration }}s</span>
+          <template v-for="item in storyboardFlowItems" :key="item.key">
+            <div v-if="item.type === 'shot'" class="shot-card">
+              <div class="shot-header">
+                <span class="shot-id">{{ item.shot.shot_id }}</span>
+                <div class="shot-meta">
+                  <span class="tag type">{{ item.shot.camera_setup?.movement || item.shot.camera_motion }}</span>
+                  <span class="tag">{{ item.shot.estimated_duration }}s</span>
+                </div>
+              </div>
+              <div v-if="hasSpeechAudio(item.shot)" class="shot-field">
+                <label>台词 / 旁白</label>
+                <p>{{ item.shot.audio_reference?.content || item.shot.dialogue }}</p>
+              </div>
+              <div class="shot-field">
+                <label>画面描述</label>
+                <p>{{ item.shot.storyboard_description || item.shot.visual_description_zh }}</p>
+              </div>
+              <div v-if="item.shot.image_prompt" class="shot-field">
+                <label>Image Prompt</label>
+                <p class="en">{{ item.shot.image_prompt }}</p>
+              </div>
+              <div class="shot-field">
+                <label>Video Prompt</label>
+                <p class="en">{{ item.shot.final_video_prompt || item.shot.visual_prompt }}</p>
+              </div>
+
+              <div v-if="hasSpeechAudio(item.shot)" class="tts-bar">
+                <button class="tts-btn" @click="generateOneTTS(item.shot.shot_id)" :disabled="item.shot.ttsLoading">
+                  {{ item.shot.ttsLoading ? '生成中...' : '生成语音' }}
+                </button>
+                <audio v-if="item.shot.audio_url" :src="getMediaUrl(item.shot.audio_url)" controls style="height: 28px; flex: 1"></audio>
+                <span v-if="item.shot.audio_duration" class="tts-duration">{{ item.shot.audio_duration.toFixed(1) }}s</span>
+              </div>
+
+              <div class="tts-bar">
+                <button class="tts-btn" @click="generateOneImage(item.shot.shot_id)" :disabled="item.shot.imageLoading">
+                  {{ item.shot.imageLoading ? '生成中...' : '生成图片' }}
+                </button>
+              </div>
+              <img v-if="item.shot.image_url" :src="getMediaUrl(item.shot.image_url)" class="shot-image" />
+              <div v-if="item.shot.image_url" class="tts-bar">
+                <button class="tts-btn" @click="generateOneImage(item.shot.shot_id)" :disabled="item.shot.imageLoading">重新生成图片</button>
+                <button class="tts-btn" @click="generateOneVideo(item.shot.shot_id)" :disabled="item.shot.videoLoading">
+                  {{ item.shot.videoLoading ? '生成中...' : '生成视频' }}
+                </button>
+              </div>
+              <video v-if="item.shot.video_url" :src="getMediaUrl(item.shot.video_url)" controls class="shot-video"></video>
+            </div>
+
+            <div v-else class="transition-slot" :class="{ ready: item.ready }">
+              <div class="transition-slot-top">
+                <div class="transition-heading">
+                  <span class="transition-kicker">Transition Slot</span>
+                  <div class="transition-title-row">
+                    <div class="transition-title">过渡视频</div>
+                    <span class="transition-status-badge" :class="{ ready: item.ready }">
+                      {{ item.ready ? 'Ready' : 'Pending' }}
+                    </span>
+                  </div>
+                </div>
+                <span class="transition-pair">{{ item.fromShot.shot_id }} -> {{ item.toShot.shot_id }}</span>
+              </div>
+              <div class="transition-preview-strip">
+                <div class="transition-frame">
+                  <div class="transition-frame-label">前镜尾部</div>
+                  <img
+                    v-if="item.fromShot.image_url"
+                    :src="getMediaUrl(item.fromShot.image_url)"
+                    class="transition-frame-image"
+                  />
+                  <div v-else class="transition-frame-placeholder">等待首帧素材</div>
+                </div>
+                <div class="transition-arrow-wrap">
+                  <span class="transition-arrow-line"></span>
+                  <span class="transition-arrow-text">过渡</span>
+                </div>
+                <div class="transition-frame">
+                  <div class="transition-frame-label">后镜首部</div>
+                  <img
+                    v-if="item.toShot.image_url"
+                    :src="getMediaUrl(item.toShot.image_url)"
+                    class="transition-frame-image"
+                  />
+                  <div v-else class="transition-frame-placeholder">等待目标首帧</div>
+                </div>
+              </div>
+              <p class="transition-copy">
+                {{ item.ready
+                  ? '前后镜头素材已就绪，可在这里插入过渡片段。当前仅展示 UI，不会真正发起生成。'
+                  : '等待前后镜头至少生成出图片或视频后，再进入可生成状态。当前仅保留界面占位。'
+                }}
+              </p>
+              <div class="transition-meta">
+                <span class="transition-chip">建议时长 1-2s</span>
+                <span class="transition-pill" :class="{ active: !!item.fromShot.video_url }">前镜视频</span>
+                <span class="transition-pill" :class="{ active: !!(item.toShot.video_url || item.toShot.image_url) }">后镜首帧</span>
+              </div>
+              <div class="transition-action-row">
+                <button class="transition-btn" :class="{ disabled: !item.ready }" @click="previewTransitionSlot(item)">
+                  {{ item.ready ? '生成过渡视频（UI预留）' : '过渡视频待就绪' }}
+                </button>
+                <span class="transition-hint">
+                  {{ item.ready ? '下一步可接后端生成接口' : '先补齐两侧素材' }}
+                </span>
               </div>
             </div>
-            <div v-if="hasSpeechAudio(shot)" class="shot-field">
-              <label>台词 / 旁白</label>
-              <p>{{ shot.audio_reference?.content || shot.dialogue }}</p>
-            </div>
-            <div class="shot-field">
-              <label>画面描述</label>
-              <p>{{ shot.storyboard_description || shot.visual_description_zh }}</p>
-            </div>
-            <div v-if="shot.image_prompt" class="shot-field">
-              <label>Image Prompt</label>
-              <p class="en">{{ shot.image_prompt }}</p>
-            </div>
-            <div class="shot-field">
-              <label>Video Prompt</label>
-              <p class="en">{{ shot.final_video_prompt || shot.visual_prompt }}</p>
-            </div>
-
-            <!-- TTS controls -->
-            <div v-if="hasSpeechAudio(shot)" class="tts-bar">
-              <button class="tts-btn" @click="generateOneTTS(shot.shot_id)" :disabled="shot.ttsLoading">
-                {{ shot.ttsLoading ? '生成中...' : '生成语音' }}
-              </button>
-              <audio v-if="shot.audio_url" :src="getMediaUrl(shot.audio_url)" controls style="height: 28px; flex: 1"></audio>
-              <span v-if="shot.audio_duration" class="tts-duration">{{ shot.audio_duration.toFixed(1) }}s</span>
-            </div>
-
-            <!-- Image controls -->
-            <div class="tts-bar">
-              <button class="tts-btn" @click="generateOneImage(shot.shot_id)" :disabled="shot.imageLoading">
-                {{ shot.imageLoading ? '生成中...' : '生成图片' }}
-              </button>
-            </div>
-            <img v-if="shot.image_url" :src="getMediaUrl(shot.image_url)" class="shot-image" />
-            <div v-if="shot.image_url" class="tts-bar">
-              <button class="tts-btn" @click="generateOneImage(shot.shot_id)" :disabled="shot.imageLoading">重新生成图片</button>
-              <button class="tts-btn" @click="generateOneVideo(shot.shot_id)" :disabled="shot.videoLoading">
-                {{ shot.videoLoading ? '生成中...' : '生成视频' }}
-              </button>
-            </div>
-            <video v-if="shot.video_url" :src="getMediaUrl(shot.video_url)" controls class="shot-video"></video>
-          </div>
+          </template>
         </div>
 
         <!-- 完整视频播放器 -->
@@ -342,6 +403,29 @@ const concatLoading = ref(false)
 const concatVideoUrl = ref('')
 
 const hasAnyVideo = computed(() => shots.value.some(s => s.video_url))
+const storyboardFlowItems = computed(() => {
+  const items = []
+  for (let i = 0; i < shots.value.length; i += 1) {
+    const shot = shots.value[i]
+    items.push({
+      type: 'shot',
+      key: `shot-${shot.shot_id}`,
+      shot,
+    })
+
+    const nextShot = shots.value[i + 1]
+    if (!nextShot) continue
+
+    items.push({
+      type: 'transition',
+      key: `transition-${shot.shot_id}-${nextShot.shot_id}`,
+      fromShot: shot,
+      toShot: nextShot,
+      ready: !!shot.video_url && !!(nextShot.video_url || nextShot.image_url),
+    })
+  }
+  return items
+})
 
 // 生成唯一 ID
 function generateUniqueId() {
@@ -669,7 +753,8 @@ async function parseStoryboard() {
       body: JSON.stringify({
         script,
         provider: settings.provider,
-        model: settings.model
+        model: settings.model,
+        ...(storyStore.storyId ? { story_id: storyStore.storyId } : {}),
       })
     })
 
@@ -750,6 +835,15 @@ function hasSpeechAudio(shot) {
   return !!(shot && (shot.audio_reference?.content || shot.dialogue) && shot.audio_reference?.type !== 'sfx')
 }
 
+function previewTransitionSlot(item) {
+  if (!item?.fromShot || !item?.toShot) return
+  if (item.ready) {
+    error.value = `过渡视频 UI 已预留：${item.fromShot.shot_id} -> ${item.toShot.shot_id}。当前版本仅展示前端界面，后端生成接口暂未接入。`
+    return
+  }
+  error.value = `过渡槽位尚未就绪：请先为 ${item.fromShot.shot_id} 生成视频，并为 ${item.toShot.shot_id} 生成图片或视频。`
+}
+
 async function generateOneTTS(shotId) {
   // Edge TTS 不需要 API Key，无需守卫
 
@@ -808,6 +902,7 @@ async function generateOneImage(shotId) {
       headers: { 'Content-Type': 'application/json', ...getHeaders() },
       body: JSON.stringify({
         shots: [shot],
+        ...(storyStore.storyId ? { story_id: storyStore.storyId } : {}),
         ...(settings.effectiveImageModel ? { model: settings.effectiveImageModel } : {}),
       })
     })
@@ -855,6 +950,7 @@ async function generateOneVideo(shotId) {
       headers: { 'Content-Type': 'application/json', ...getHeaders() },
       body: JSON.stringify({
         shots: [shot],
+        ...(storyStore.storyId ? { story_id: storyStore.storyId } : {}),
         ...(settings.effectiveVideoModel ? { model: settings.effectiveVideoModel } : {}),
       })
     })
@@ -1608,6 +1704,18 @@ button:disabled {
   padding: 8px 20px;
 }
 
+.transition-note {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border: 1px solid #d7d1bf;
+  border-radius: 12px;
+  background:
+    linear-gradient(135deg, rgba(238, 231, 209, 0.95), rgba(246, 242, 232, 0.98));
+  color: #63553a;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .shots-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -1625,6 +1733,250 @@ button:disabled {
 .shot-card:hover {
   border-color: #6c63ff;
   box-shadow: 0 2px 12px rgba(108, 99, 255, 0.1);
+}
+
+.transition-slot {
+  position: relative;
+  overflow: hidden;
+  background:
+    linear-gradient(160deg, rgba(255, 248, 235, 0.98), rgba(247, 241, 228, 0.98));
+  border: 1px dashed #d1b97c;
+  border-radius: 12px;
+  padding: 16px;
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.transition-slot::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: linear-gradient(180deg, #b7852d, #e1ca8a);
+}
+
+.transition-slot.ready {
+  border-style: solid;
+  border-color: #b7852d;
+  box-shadow: 0 8px 24px rgba(183, 133, 45, 0.12);
+}
+
+.transition-slot-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.transition-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.transition-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.transition-kicker {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #a07018;
+}
+
+.transition-pair {
+  font-size: 11px;
+  color: #8b7750;
+  text-align: right;
+  word-break: break-word;
+}
+
+.transition-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #4f3d1d;
+}
+
+.transition-status-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: rgba(116, 103, 81, 0.12);
+  color: #7f6d49;
+  border: 1px solid rgba(116, 103, 81, 0.18);
+}
+
+.transition-status-badge.ready {
+  background: rgba(183, 133, 45, 0.15);
+  color: #87590f;
+  border-color: rgba(183, 133, 45, 0.3);
+}
+
+.transition-preview-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 72px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.transition-frame {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.transition-frame-label {
+  font-size: 10px;
+  color: #8f7d59;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.transition-frame-image,
+.transition-frame-placeholder {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 10px;
+}
+
+.transition-frame-image {
+  object-fit: cover;
+  border: 1px solid rgba(177, 152, 97, 0.22);
+  box-shadow: 0 8px 20px rgba(116, 93, 44, 0.08);
+}
+
+.transition-frame-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+  color: #907f5d;
+  background:
+    linear-gradient(135deg, rgba(255, 252, 245, 0.9), rgba(239, 232, 214, 0.9));
+  border: 1px dashed rgba(177, 152, 97, 0.35);
+}
+
+.transition-arrow-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.transition-arrow-line {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(90deg, rgba(183, 133, 45, 0.15), rgba(183, 133, 45, 0.92));
+}
+
+.transition-arrow-line::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: -1px;
+  width: 10px;
+  height: 10px;
+  border-top: 2px solid #b7852d;
+  border-right: 2px solid #b7852d;
+  transform: translateY(-50%) rotate(45deg);
+}
+
+.transition-arrow-text {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #b7852d;
+}
+
+.transition-copy {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #6c5b3b;
+}
+
+.transition-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.transition-chip {
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(79, 61, 29, 0.08);
+  color: #5e4a27;
+  font-size: 11px;
+  border: 1px solid rgba(79, 61, 29, 0.12);
+}
+
+.transition-pill {
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(122, 106, 69, 0.08);
+  color: #8c7d5a;
+  font-size: 11px;
+  border: 1px solid rgba(122, 106, 69, 0.14);
+}
+
+.transition-pill.active {
+  background: rgba(183, 133, 45, 0.15);
+  color: #7a5311;
+  border-color: rgba(183, 133, 45, 0.35);
+}
+
+.transition-btn {
+  margin-top: 4px;
+  border: none;
+  border-radius: 10px;
+  padding: 10px 14px;
+  background: #b7852d;
+  color: #fffaf1;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s, opacity 0.2s, transform 0.2s;
+}
+
+.transition-btn:hover {
+  background: #9f711f;
+  transform: translateY(-1px);
+}
+
+.transition-btn.disabled {
+  background: #cdb88c;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.transition-action-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.transition-hint {
+  font-size: 11px;
+  color: #8f7f5c;
 }
 
 .shot-header {
@@ -1728,6 +2080,37 @@ button:disabled {
   width: 100%;
   border-radius: 6px;
   margin-top: 8px;
+}
+
+@media (max-width: 720px) {
+  .transition-slot-top {
+    flex-direction: column;
+  }
+
+  .transition-pair {
+    text-align: left;
+  }
+
+  .transition-preview-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .transition-arrow-wrap {
+    min-height: 42px;
+  }
+
+  .transition-arrow-line {
+    width: 2px;
+    height: 28px;
+    background: linear-gradient(180deg, rgba(183, 133, 45, 0.15), rgba(183, 133, 45, 0.92));
+  }
+
+  .transition-arrow-line::after {
+    top: auto;
+    right: 50%;
+    bottom: -1px;
+    transform: translateX(50%) rotate(135deg);
+  }
 }
 /* 导出完整视频按钮 */
 .concat-btn {

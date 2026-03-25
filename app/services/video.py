@@ -164,6 +164,7 @@ async def generate_videos_chained(
                     model=image_model,
                     image_api_key=image_api_key,
                     image_base_url=image_base_url,
+                    negative_prompt=shot.get("negative_prompt", ""),
                 )
                 image_url_for_video = f"{base_url}{img_result['image_url']}"
                 local_image_url = img_result["image_url"]

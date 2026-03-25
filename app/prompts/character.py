@@ -51,10 +51,9 @@ def build_character_section(character_info: Optional[dict]) -> str:
         role = c.get("role", "")
         desc = c.get("description", "")
         lines.append(f"- **{name}**（{role}）：{desc}")
-        portrait = (
-            character_images.get(name, {}).get("portrait_prompt")
-            or character_images.get(name, {}).get("prompt", "")
-        ) if isinstance(character_images, dict) else ""
-        if portrait:
-            lines.append(f"  Portrait prompt: {portrait}")
+        visual_dna = ""
+        if isinstance(character_images, dict):
+            visual_dna = character_images.get(name, {}).get("visual_dna", "")
+        if visual_dna:
+            lines.append(f"  Visual DNA: {visual_dna}")
     return "\n".join(lines)

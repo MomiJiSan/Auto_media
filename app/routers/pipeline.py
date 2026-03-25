@@ -17,6 +17,8 @@ from app.schemas.storyboard import Storyboard
 from app.services.storyboard import parse_script_to_storyboard
 from app.services.pipeline_executor import PipelineExecutor
 from app.services import story_repository as repo
+from app.core.story_context import build_generation_payload
+from app.services.story_context_service import prepare_story_context
 from uuid import uuid4
 
 router = APIRouter(prefix="/api/v1/pipeline", tags=["pipeline"])
@@ -37,6 +39,26 @@ def _get_or_create(project_id: str) -> dict:
             "generated_files": None,
         }
     return _pipeline_states[project_id]
+
+
+async def _load_story_context(
+    db: AsyncSession,
+    story_id: str | None,
+    *,
+    provider: str = "",
+    model: str = "",
+    api_key: str = "",
+    base_url: str = "",
+):
+    story, story_context = await prepare_story_context(
+        db,
+        story_id,
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+    )
+    return story or None, story_context
 
 
 @router.post("/{project_id}/auto-generate", response_model=AutoGenerateResponse)
@@ -122,6 +144,7 @@ async def auto_generate(
                 video_provider=video_provider,
                 character_info=character_info,
                 art_style=art_style,
+                story_id=req.story_id,
             )
 
     background_tasks.add_task(_run_pipeline)
@@ -166,6 +189,14 @@ async def generate_storyboard(
     try:
         # 获取角色信息（如果提供了 story_id）
         character_info = None
+        _, story_context = await _load_story_context(
+            db,
+            req.story_id,
+            provider=provider,
+            model=script_llm["model"] or req.model or "",
+            api_key=script_llm["api_key"],
+            base_url=script_llm["base_url"],
+        )
         if req.story_id:
             try:
                 story = await repo.get_story(db, req.story_id)
@@ -187,6 +218,7 @@ async def generate_storyboard(
             api_key=script_llm["api_key"],
             base_url=script_llm["base_url"],
             character_info=character_info,
+            character_section_override=story_context.clean_character_section if story_context else None,
         )
     except Exception as e:
         await repo.save_pipeline(db, pipeline_id, project_id, {
@@ -215,9 +247,12 @@ async def generate_assets(
     request: Request,
     storyboard: Storyboard,
     image_config: dict = Depends(image_config_dep),
+    llm: dict = Depends(llm_config_dep),
     voice: str = Query("zh-CN-XiaoxiaoNeural", description="TTS 语音"),
     image_model: str = Query("black-forest-labs/FLUX.1-schnell", description="图片生成模型"),
+    story_id: str | None = Query(None, description="可选 story_id，用于应用一致性上下文"),
     background_tasks: BackgroundTasks = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """
     手动触发：生成 TTS 和图片资产
@@ -239,6 +274,14 @@ async def generate_assets(
     shots = storyboard.shots
     total = len(shots)
     art_style = get_art_style(request)
+    _, story_context = await _load_story_context(
+        db,
+        story_id,
+        provider=llm["provider"],
+        model=llm["model"],
+        api_key=llm["api_key"],
+        base_url=llm["base_url"],
+    )
 
     async def _generate():
         """后台生成任务"""
@@ -256,15 +299,7 @@ async def generate_assets(
             # 图片
             state["progress_detail"] = {"step": "image", "current": 0, "total": total, "message": "生成图片..."}
             image_results = await image.generate_images_batch(
-                shots=[
-                    {
-                        "shot_id": s.shot_id,
-                        "image_prompt": s.image_prompt,
-                        "final_video_prompt": s.final_video_prompt,
-                        "last_frame_prompt": s.last_frame_prompt,
-                    }
-                    for s in shots
-                ],
+                shots=[build_generation_payload(s, story_context, art_style=art_style) for s in shots],
                 model=image_model,
                 art_style=art_style,
                 **image_config,
@@ -296,9 +331,12 @@ async def render_video(
     request: Request,
     shots_data: list[dict],
     video_config: dict = Depends(video_config_dep),
+    llm: dict = Depends(llm_config_dep),
     base_url: str = Query("http://localhost:8000", description="服务器地址"),
     video_model: str = Query("wan2.6-i2v-flash", description="视频生成模型"),
+    story_id: str | None = Query(None, description="可选 story_id，用于应用一致性上下文"),
     background_tasks: BackgroundTasks = None,
+    db: AsyncSession = Depends(get_db),
 ):
     """
     手动触发：图生视频
@@ -317,6 +355,14 @@ async def render_video(
         current_step="图生视频中",
     )
     art_style = get_art_style(request)
+    _, story_context = await _load_story_context(
+        db,
+        story_id,
+        provider=llm["provider"],
+        model=llm["model"],
+        api_key=llm["api_key"],
+        base_url=llm["base_url"],
+    )
 
     async def _render():
         """后台渲染任务"""
@@ -324,8 +370,19 @@ async def render_video(
             total = len(shots_data)
             state["progress_detail"] = {"step": "video", "current": 0, "total": total, "message": "生成视频..."}
 
+            prepared_shots = []
+            for shot in shots_data:
+                payload = build_generation_payload(shot, story_context, art_style=art_style)
+                prepared_shots.append(
+                    {
+                        **shot,
+                        "final_video_prompt": payload["final_video_prompt"],
+                        "negative_prompt": payload.get("negative_prompt", ""),
+                    }
+                )
+
             video_results = await video.generate_videos_batch(
-                shots=shots_data,
+                shots=prepared_shots,
                 base_url=base_url,
                 model=video_model,
                 art_style=art_style,

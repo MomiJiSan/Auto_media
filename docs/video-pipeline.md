@@ -2,30 +2,34 @@
 
 > 后端处理逻辑：从分镜 JSON 到视频成片的质量控制链路
 > 提示词模板详见 [prompt-framework.md](prompt-framework.md)
-> 更新日期：2026-03-24
+> 更新日期：2026-03-25
 
 ---
 
 ## 一、管线总览
 
+> 说明：本文中较早出现的 `build_final_prompt()` 属于设计期命名。按照当前仓库实现，更接近真实代码边界的入口是 `app/core/story_context.py` 中的 `build_generation_payload()`，由 `PipelineExecutor`、`image.py`、`video.py` 等链路复用。
+
 ```
 分镜 JSON (Shot List)
   │
-  ├─ 1. Visual DNA 注入 ──── 强制替换 subject_and_clothing 为固定描述串
+  ├─ 0. StoryContext 构建 ─── 角色锁、画风、场景风格、negative prompt 汇总
+  ├─ 1. CharacterLock 注入 ── 角色外貌/服装锚点合并到生成 payload
   ├─ 2. 镜头流上下文注入 ─── 携带前一镜头环境信息，添加衔接短语
   ├─ 3. 强度分级渲染标签 ─── 按 scene_intensity 注入 low/high 渲染参数
-  ├─ 4. Negative Prompt ──── 后缀注入画质约束
+  ├─ 4. Negative Prompt ──── 通过独立字段或 provider 参数注入
   │
   ▼
-  build_final_prompt()  ── 组装最终送入视频 API 的完整 Prompt
+  build_generation_payload() / build_*_generation_prompt()
   │
   ├─ 5. Judge Agent 审查 ─── fast model 逻辑/物理一致性检查（可选）
   ├─ 6. 起始帧生成 ────── 静态图作为视频首帧引导（可选，视 API 支持）
+  ├─ 7. VLM 反馈闭环 ──── 关键镜头抽检，不通过则增强 prompt 后有限次重试（规划中）
   │
   ▼
   视频生成 API (Kling / Runway / Seedance / Sora)
   │
-  ├─ 7. 换脸后处理 ────── 替代/增强角色一致性（可选，视 API 支持）
+  ├─ 8. 换脸后处理 ────── 替代/增强角色一致性（可选，视 API 支持）
   │
   ▼
   最终视频素材
@@ -179,6 +183,8 @@ def inject_negative_prompt(shot: dict) -> dict:
 ---
 
 ## 六、build_final_prompt 组装（完整流程）
+
+> 当前代码中已经拆分为 `build_image_generation_prompt()` / `build_video_generation_prompt()` / `build_last_frame_generation_prompt()` 与 `build_generation_payload()`；本节保留的是设计上的等价表达。
 
 将以上所有步骤串联为统一的后处理函数：
 
@@ -387,3 +393,45 @@ async def generate_video_pipeline(
 
     return videos
 ```
+
+---
+
+## 十一、后续演进：DSPy 与 Generative Feedback Loops
+
+### 11.1 DSPy 的建议挂载点
+
+- 将角色外貌提取逻辑放在 `app/core/story_context.py` 的缓存构建阶段
+- 目标输出继续落到 `Story.meta["character_appearance_cache"]`
+- 生产环境只加载离线编译好的 DSPy 配置，不在请求链路实时 compile
+
+### 11.2 建议的数据契约
+
+```python
+class CharacterAppearance(BaseModel):
+    body: str
+    clothing: str
+```
+
+对应现有运行时结构：
+
+- `CharacterLock.body_features <- body`
+- `CharacterLock.default_clothing <- clothing`
+
+### 11.3 反馈闭环的建议挂载点
+
+- 图片生成后：检查角色外貌、服装、主体数量是否满足 `CharacterLock`
+- 视频生成后：检查起始帧一致性、动作完成度、尾帧目标状态是否满足要求
+- 失败时只对当前 shot 增加纠错指令并有限次重试，不回滚整个 pipeline
+
+### 11.4 成本控制原则
+
+- 不对每个镜头默认全量质检
+- 新角色首次出场必须检
+- 大跨度换装必须检
+- 同场景连续镜头建议每 3-5 镜抽检一次
+
+### 11.5 当前状态
+
+- `StoryContext` 与统一 payload 组装已进入主链路
+- DSPy 提取器尚未接入
+- VLM 质检与自动重试尚未接入

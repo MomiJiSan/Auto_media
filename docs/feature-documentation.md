@@ -236,8 +236,10 @@
 当前仓库中：
 
 - 画风透传已实现
-- 角色 prompt 增强仍是运行期拼接方式
-- 更完整的 `StoryContext` / Prompt Caching / 结构化外貌缓存方案尚未完全实现
+- `StoryContext` / `build_generation_payload()` 已经进入主生成链路，用于统一组装 `image_prompt` / `final_video_prompt` / `last_frame_prompt` / `negative_prompt`
+- 角色外貌锁定当前仍以 `Story.meta["character_appearance_cache"]` + `character_images.visual_dna` + 启发式回退为主，尚未接入 DSPy 这类声明式结构化提取器
+- Prompt Caching 仍停留在设计阶段
+- 图片/视频生成当前仍是“一次生成直出”，尚未在 `PipelineExecutor` 中加入基于 VLM 的自动质检与重试闭环
 
 设计文档见：
 
@@ -269,6 +271,8 @@
 | `/stitch` 仍为占位实现 | 中 | 接口存在，但尚未接入真实 FFmpeg 合成批处理 |
 | 人物一致性仍非结构化缓存驱动 | 高 | `StoryContext` 方案尚未完全落地 |
 | Prompt Caching 尚未接入 | 中 | 仅有设计文档 |
+| DSPy 声明式提取尚未接入 | 中 | 角色外貌提取仍以启发式和缓存回退为主 |
+| 生成后反馈闭环尚未接入 | 中 | 尚无 VLM 质检、选择性抽检与自动重试 |
 | 历史遗留 `projects` 模块 | 中 | 与主 Story / Pipeline 流程割裂 |
 | 更强的断点续跑 | 中 | 尚未实现 |
 
@@ -292,6 +296,8 @@
 
 - [ ] 落地 `StoryContext` 一致性引擎
 - [ ] 接入 Prompt Caching
+- [ ] 用 DSPy 重构角色外貌提取器，并将编译产物作为离线资产加载
+- [ ] 在 `PipelineExecutor` 增加选择性 VLM 质检与重试闭环
 - [ ] 完成真正的 `integrated` 视频语音一体策略
 - [ ] 把手动步进状态从内存迁移到可恢复存储
 

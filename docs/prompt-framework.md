@@ -612,6 +612,8 @@ def _parse_shots(raw: str) -> List[Shot]:
 8. **镜头流连续性**：同场景相邻 Shot 在 `final_video_prompt` 中加入衔接短语，避免背景/光影跳戏。
 9. **模块化更新**：REFINE_PROMPT 只更新受影响模块，其余返回 `null`，避免过度重写。
 10. **镜头强度分级**：`scene_intensity` 在 SCRIPT_PROMPT 阶段标注，分镜阶段动态注入不同渲染标签（low=4k / high=8k+macro），API 成本和画质的最优平衡。
+11. **声明式结构化提取**：后续优先用 DSPy `Signature`/`TypedPredictor` 生成 `CharacterLock`，减少长字符串 prompt 在不同底层模型上的漂移。
+12. **选择性反馈闭环**：生成后的 VLM 质检只对关键镜头或抽检镜头启用，失败时回写纠错指令并有限次重试，不默认全量覆盖所有镜头。
 
 > 后端处理层面的质量控制（Negative Prompt 注入、Judge Agent 审查、起始帧策略、build_final_prompt 组装逻辑）详见 [video-pipeline.md](video-pipeline.md)。
 

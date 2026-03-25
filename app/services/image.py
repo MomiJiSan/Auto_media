@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import logging
 import re
 import time
 import httpx
@@ -15,6 +16,8 @@ IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 CHARACTER_DIR = Path("media/characters")
 CHARACTER_DIR.mkdir(parents=True, exist_ok=True)
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "black-forest-labs/FLUX.1-schnell"
 IMAGE_SIZE = "1280x720"
@@ -48,7 +51,14 @@ def _extract_image_url(resp) -> str:
     )
 
 
-async def generate_image(visual_prompt: str, shot_id: str, model: str = DEFAULT_MODEL, image_api_key: str = "", image_base_url: str = "") -> dict:
+async def generate_image(
+    visual_prompt: str,
+    shot_id: str,
+    model: str = DEFAULT_MODEL,
+    image_api_key: str = "",
+    image_base_url: str = "",
+    negative_prompt: str = "",
+) -> dict:
     """Generate image for a single shot. Returns { shot_id, image_path, image_url }."""
     base_url = image_base_url or settings.siliconflow_base_url
     if image_base_url and not image_api_key:
@@ -56,12 +66,30 @@ async def generate_image(visual_prompt: str, shot_id: str, model: str = DEFAULT_
     image_api_key = image_api_key or settings.siliconflow_api_key
     size = ARK_IMAGE_SIZE if _is_ark(base_url) else IMAGE_SIZE
     async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            f"{base_url}/images/generations",
-            headers={"Authorization": f"Bearer {image_api_key}"},
-            json={"model": model, "prompt": visual_prompt, "n": 1, "size": size, "response_format": "url"},
-        )
+        payload = {"model": model, "prompt": visual_prompt, "n": 1, "size": size, "response_format": "url"}
+        if negative_prompt:
+            payload["negative_prompt"] = negative_prompt
+
+        async def _submit(request_payload: dict) -> httpx.Response:
+            return await client.post(
+                f"{base_url}/images/generations",
+                headers={"Authorization": f"Bearer {image_api_key}"},
+                json=request_payload,
+            )
+
+        resp = await _submit(payload)
         print(f"[IMAGE] status={resp.status_code} key={mask_key(image_api_key)} base={base_url}")
+        if not resp.is_success and negative_prompt and resp.status_code in (400, 422):
+            logger.warning(
+                "Image provider rejected negative_prompt for shot %s, retrying without it. status=%s body=%s",
+                shot_id,
+                resp.status_code,
+                resp.text[:200],
+            )
+            retry_payload = dict(payload)
+            retry_payload.pop("negative_prompt", None)
+            resp = await _submit(retry_payload)
+            print(f"[IMAGE][RETRY_NO_NEGATIVE] status={resp.status_code} key={mask_key(image_api_key)} base={base_url}")
         if not resp.is_success:
             raise RuntimeError(f"图片生成 API 错误 {resp.status_code}: {resp.text[:200]}")
         image_url = _extract_image_url(resp)
@@ -100,7 +128,16 @@ async def generate_images_batch(shots: list[dict], model: str = DEFAULT_MODEL, i
         shot_id = shot["shot_id"]
 
         # 首帧图片
-        tasks.append(generate_image(_prompt(shot), shot_id, model, image_api_key, image_base_url))
+        tasks.append(
+            generate_image(
+                _prompt(shot),
+                shot_id,
+                model,
+                image_api_key,
+                image_base_url,
+                shot.get("negative_prompt", ""),
+            )
+        )
 
         # 尾帧图片（如果提供了last_frame_prompt）
         if shot.get("last_frame_prompt"):
@@ -111,6 +148,7 @@ async def generate_images_batch(shots: list[dict], model: str = DEFAULT_MODEL, i
                     model,
                     image_api_key,
                     image_base_url,
+                    shot.get("last_frame_negative_prompt") or shot.get("negative_prompt", ""),
                 )
             )
 
