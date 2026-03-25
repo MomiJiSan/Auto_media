@@ -30,7 +30,11 @@ export const useStoryStore = defineStore('story', {
   actions: {
     setSelectedSetting(val) { this.selectedSetting = val },
     setArtStyle(val) {
-      const normalized = (val ?? '').trim()
+      if (typeof val !== 'string') {
+        this.artStyle = ''
+        return
+      }
+      const normalized = val.trim()
       this.artStyle = normalized.length ? normalized : ''
     },
     setStep(n) { this.currentStep = n },
@@ -111,7 +115,7 @@ export const useStoryStore = defineStore('story', {
       this.outline = storyData.outline || []
       this.scenes = storyData.scenes || []
       this.characterImages = storyData.character_images || {}
-      this.artStyle = storyData.art_style || ''
+      this.setArtStyle(storyData.art_style || '')
       this.wbHistory = storyData.wb_history || []
       this.wbTurn = storyData.wb_turn || 0
       this.step3Done = (storyData.scenes || []).length > 0
