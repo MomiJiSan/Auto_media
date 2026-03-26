@@ -49,6 +49,7 @@
 import { ref, watch, nextTick, computed } from 'vue'
 import { useStoryStore } from '../stores/story.js'
 import { streamChat, applyChatChanges } from '../api/story.js'
+import { findCharacterByRef } from '../utils/character.js'
 
 const props = defineProps({ show: Boolean, character: Object })
 const emit = defineEmits(['close'])
@@ -72,7 +73,7 @@ async function scrollToBottom() {
 watch(() => messages.value.length, scrollToBottom)
 watch(streamingText, scrollToBottom)
 
-watch(() => props.character?.name, () => {
+watch(() => props.character?.id || props.character?.name, () => {
   messages.value = []
   input.value = ''
   error.value = ''
@@ -110,24 +111,36 @@ async function send() {
 
 async function confirmApply() {
   if (!props.character || applying.value) return
+  if (!props.character.id) {
+    error.value = '角色 ID 缺失，无法安全应用修改，请重新生成或刷新后重试'
+    return
+  }
   applying.value = true
   error.value = ''
   try {
     // 从 store 取最新数据，避免 props 陈旧
-    const currentChar = store.characters.find(c => c.name === props.character.name) || props.character
+    const currentChar = findCharacterByRef(store.characters, props.character)
+    if (!currentChar?.id) {
+      error.value = '未找到带 ID 的最新角色数据，已阻止按名字误匹配'
+      return
+    }
     const res = await applyChatChanges(
       store.storyId,
       'character',
       messages.value,
-      { name: currentChar.name, role: currentChar.role, description: currentChar.description },
+      { id: currentChar.id, name: currentChar.name, role: currentChar.role, description: currentChar.description },
       store.characters,
       null
     )
-    if (!res || !res.description) {
+    if (!res || (!res.name && !res.role && !res.description)) {
       error.value = '未能获取修改结果，请重试'
       return
     }
-    store.updateCharacter(currentChar.name, res.description)
+    store.updateCharacter(currentChar.id, {
+      name: res.name ?? currentChar.name,
+      role: res.role ?? currentChar.role,
+      description: res.description ?? currentChar.description,
+    })
     messages.value = []
     input.value = ''
     emit('close')

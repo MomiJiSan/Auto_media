@@ -5,7 +5,7 @@
 """
 from typing import Optional
 
-from app.core.story_assets import get_character_design_prompt, get_character_visual_dna
+from app.core.story_context import build_character_reference_anchor
 
 
 # ============================================================================
@@ -13,7 +13,7 @@ from app.core.story_assets import get_character_design_prompt, get_character_vis
 # ============================================================================
 
 def build_character_prompt(name: str, role: str, description: str) -> str:
-    """构建角色设计图生成 prompt（偏全身人设图 / 角色设定图，而不是头像）。"""
+    """构建标准三视图角色设定图 prompt。"""
     role = role or ""
     description = description or ""
     role_lower = role.lower()
@@ -26,23 +26,19 @@ def build_character_prompt(name: str, role: str, description: str) -> str:
     else:
         role_cue = f"{role}"
     return (
-        f"Full-body character design sheet for {name}, {role_cue}, "
+        f"Standard three-view character turnaround sheet for {name}, {role_cue}, "
         f"character description: {description}, "
-        "show the complete outfit from head to toe, clear silhouette, distinctive physical traits, "
-        "front-facing hero pose, clean neutral backdrop, professional character concept art, "
-        "costume details, fabric texture, accessories, production-ready character sheet, highly detailed, photorealistic"
+        "show front view, side profile, and back view of the same character on one sheet, "
+        "full body in all three views, neutral standing pose, clear silhouette, "
+        "consistent facial features and costume details across views, clean neutral backdrop, "
+        "production-ready character turnaround sheet, costume construction details, fabric texture, "
+        "accessories, highly detailed, photorealistic"
     )
 
 
 # ============================================================================
 # 分镜角色参考信息块构建
 # ============================================================================
-
-
-def _get_character_anchor_text(character_images: dict, name: str) -> str:
-    return get_character_visual_dna(character_images, name) or get_character_design_prompt(character_images, name)
-
-
 def build_character_section(character_info: Optional[dict]) -> str:
     """构建传给分镜 LLM 的角色参考信息块。"""
     if not character_info:
@@ -54,11 +50,17 @@ def build_character_section(character_info: Optional[dict]) -> str:
 
     lines = ["## Character Reference (maintain consistency across all shots)"]
     for c in characters:
+        char_id = c.get("id", "")
         name = c.get("name", "")
         role = c.get("role", "")
         desc = c.get("description", "")
         lines.append(f"- **{name}**（{role}）：{desc}")
-        visual_anchor = _get_character_anchor_text(character_images, name)
+        visual_anchor = build_character_reference_anchor(
+            character_images,
+            name,
+            character_id=char_id,
+            description=desc,
+        )
         if visual_anchor:
             lines.append(f"  Visual DNA: {visual_anchor}")
     return "\n".join(lines)

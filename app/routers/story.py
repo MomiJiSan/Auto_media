@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
-from app.core.story_assets import get_character_design_prompt, get_character_visual_dna
+from app.core.story_assets import get_character_visual_dna
+from app.core.story_context import build_character_reference_anchor
 from app.schemas.story import AnalyzeIdeaRequest, GenerateOutlineRequest, GenerateScriptRequest, ChatRequest, RefineRequest, WorldBuildingStartRequest, WorldBuildingTurnRequest, PatchStoryRequest, ApplyChatRequest
 from app.services.story_llm import analyze_idea, generate_outline, generate_script, chat, refine, world_building_start, world_building_turn, apply_chat
 from app.services import story_repository as repo
@@ -174,16 +175,22 @@ async def finalize_script(story_id: str, db: AsyncSession = Depends(get_db)):
     if characters:
         lines.append("# 角色信息")
         for c in characters:
+            char_id = c.get("id", "")
             name = c.get("name", "")
             role = c.get("role", "")
             desc = c.get("description", "")
             lines.append(f"- {name}（{role}）：{desc}")
-            visual_dna = get_character_visual_dna(character_images, name)
-            design_prompt = get_character_design_prompt(character_images, name)
+            visual_dna = get_character_visual_dna(character_images, char_id, name=name)
+            reference_anchor = build_character_reference_anchor(
+                character_images,
+                name,
+                character_id=char_id,
+                description=desc,
+            )
             if visual_dna:
                 lines.append(f"  Visual DNA: {visual_dna}")
-            if design_prompt:
-                lines.append(f"  角色设定图提示词: {design_prompt}")
+            elif reference_anchor:
+                lines.append(f"  角色参考锚点: {reference_anchor}")
         lines.append("")
 
     for ep in scenes:

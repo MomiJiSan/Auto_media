@@ -27,6 +27,57 @@ MODEL_MAP = {
 logger = logging.getLogger(__name__)
 
 
+def _merge_characters(existing_characters: list[dict], incoming_characters: list[dict]) -> list[dict]:
+    incoming_by_id = {
+        str(character.get("id", "")).strip(): character
+        for character in incoming_characters
+        if str(character.get("id", "")).strip()
+    }
+
+    merged: list[dict] = []
+    used_ids: set[str] = set()
+    for character in existing_characters:
+        char_id = str(character.get("id", "")).strip()
+        incoming = incoming_by_id.get(char_id)
+        if incoming:
+            merged.append({**character, **incoming})
+            used_ids.add(char_id)
+        else:
+            merged.append(character)
+
+    for character in incoming_characters:
+        char_id = str(character.get("id", "")).strip()
+        if not char_id or char_id in used_ids:
+            continue
+        merged.append(character)
+    return merged
+
+
+def _merge_outline(existing_outline: list[dict], incoming_outline: list[dict]) -> list[dict]:
+    incoming_by_episode = {
+        episode.get("episode"): episode
+        for episode in incoming_outline
+        if episode.get("episode") is not None
+    }
+    merged: list[dict] = []
+    used_episodes: set[int] = set()
+    for episode in existing_outline:
+        ep_num = episode.get("episode")
+        incoming = incoming_by_episode.get(ep_num)
+        if incoming:
+            merged.append({**episode, **incoming})
+            used_episodes.add(ep_num)
+        else:
+            merged.append(episode)
+
+    for episode in incoming_outline:
+        ep_num = episode.get("episode")
+        if ep_num in used_episodes:
+            continue
+        merged.append(episode)
+    return merged
+
+
 def _make_client(api_key: str, base_url: str) -> AsyncOpenAI:
     return AsyncOpenAI(api_key=api_key, base_url=base_url or None)
 
@@ -72,14 +123,15 @@ async def refine(story_id: str, change_type: str, change_summary: str, db: Async
     # 写回数据库，保持 DB 与前端状态同步
     updates = {}
     if data.get("characters") is not None:
-        updates["characters"] = data["characters"]
+        updates["characters"] = _merge_characters(list(story.get("characters") or []), list(data["characters"] or []))
     if data.get("relationships") is not None:
         updates["relationships"] = data["relationships"]
     if data.get("outline") is not None:
-        updates["outline"] = data["outline"]
+        updates["outline"] = _merge_outline(list(story.get("outline") or []), list(data["outline"] or []))
     if data.get("meta_theme") is not None:
         existing_meta = story.get("meta") or {}
         updates["meta"] = {**existing_meta, "theme": data["meta_theme"]}
+    latest_story = story
     if updates:
         await repo.save_story(db, story_id, updates)
         invalidate_appearance = "characters" in updates
@@ -91,11 +143,12 @@ async def refine(story_id: str, change_type: str, change_summary: str, db: Async
                 appearance=invalidate_appearance,
                 scene_style=invalidate_scene_style,
             )
+        latest_story = await repo.get_story(db, story_id)
 
     return {
-        "characters": data.get("characters"),
-        "relationships": data.get("relationships"),
-        "outline": data.get("outline"),
+        "characters": latest_story.get("characters") if data.get("characters") is not None else None,
+        "relationships": latest_story.get("relationships") if data.get("relationships") is not None else None,
+        "outline": latest_story.get("outline") if data.get("outline") is not None else None,
         "meta_theme": data.get("meta_theme"),
         "usage": {"prompt_tokens": usage.prompt_tokens, "completion_tokens": usage.completion_tokens} if usage else None,
     }
@@ -153,9 +206,13 @@ async def generate_outline(story_id: str, selected_setting: str, db: AsyncSessio
         "outline": data.get("outline", []),
     })
     await repo.invalidate_story_consistency_cache(db, story_id, appearance=True, scene_style=True)
+    latest_story = await repo.get_story(db, story_id)
     return {
         "story_id": story_id,
-        **data,
+        "meta": latest_story.get("meta"),
+        "characters": latest_story.get("characters", []),
+        "relationships": latest_story.get("relationships", []),
+        "outline": latest_story.get("outline", []),
         "usage": None,
     }
 
@@ -339,9 +396,17 @@ async def apply_chat(story_id: str, change_type: str, chat_history: list, curren
     story = await repo.get_story(db, story_id)
     if change_type == "character":
         characters = list(story.get("characters") or [])
+        current_id = str(current_item.get("id", "")).strip()
         for c in characters:
-            if c.get("name") == current_item.get("name"):
-                c["description"] = data.get("description", c["description"])
+            if current_id and str(c.get("id", "")).strip() == current_id:
+                c["name"] = data.get("name", c.get("name", ""))
+                c["role"] = data.get("role", c.get("role", ""))
+                c["description"] = data.get("description", c.get("description", ""))
+                break
+            if not current_id and c.get("name") == current_item.get("name"):
+                c["name"] = data.get("name", c.get("name", ""))
+                c["role"] = data.get("role", c.get("role", ""))
+                c["description"] = data.get("description", c.get("description", ""))
                 break
         if characters:
             await repo.save_story(db, story_id, {"characters": characters})

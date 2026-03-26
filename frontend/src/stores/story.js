@@ -1,4 +1,26 @@
 import { defineStore } from 'pinia'
+import { findCharacterByRef, getCharacterKey } from '../utils/character.js'
+
+function mergeCharacters(existingCharacters = [], incomingCharacters = []) {
+  const incomingMap = new Map(
+    incomingCharacters
+      .filter(character => getCharacterKey(character))
+      .map(character => [getCharacterKey(character), character])
+  )
+
+  const merged = existingCharacters.map(character => {
+    const next = incomingMap.get(getCharacterKey(character))
+    if (!next) return character
+    incomingMap.delete(getCharacterKey(character))
+    return { ...character, ...next }
+  })
+
+  incomingMap.forEach(character => {
+    merged.push(character)
+  })
+
+  return merged
+}
 
 export const useStoryStore = defineStore('story', {
   persist: true,
@@ -31,6 +53,11 @@ export const useStoryStore = defineStore('story', {
     totalTokens: (state) => state.usage.prompt_tokens + state.usage.completion_tokens,
   },
   actions: {
+    startNewStory(idea = '') {
+      this.$reset()
+      this.input.idea = idea
+      this.currentStep = 1
+    },
     setManualPipelineContext({ projectId = '', pipelineId = '', storyId = '' } = {}) {
       if (projectId) this.manualProjectId = projectId
       if (pipelineId) this.manualPipelineId = pipelineId
@@ -110,15 +137,13 @@ export const useStoryStore = defineStore('story', {
       const ep = this.outline.find(e => e.episode === episode)
       if (ep) { ep.title = title; ep.summary = summary }
     },
-    updateCharacter(name, description) {
-      const c = this.characters.find(c => c.name === name)
-      if (c) { c.description = description }
+    updateCharacter(characterId, fields = {}) {
+      const c = findCharacterByRef(this.characters, { id: characterId })
+      if (c) Object.assign(c, fields)
     },
     applyRefine({ characters, relationships, outline, meta_theme, usage }) {
       if (characters != null && characters.length > 0) {
-        // Merge by name: a partial LLM response must not wipe out unlisted characters
-        const nameMap = Object.fromEntries(characters.map(c => [c.name, c]))
-        this.characters = this.characters.map(c => nameMap[c.name] ?? c)
+        this.characters = mergeCharacters(this.characters, characters)
       }
       if (relationships != null && relationships.length > 0) this.relationships = relationships
       if (outline != null && outline.length > 0) {

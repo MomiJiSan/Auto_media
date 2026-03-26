@@ -16,7 +16,7 @@
         <div class="carousel-track" :style="{ transform: `translateX(-${currentIndex * 100}%)` }">
           <div
             v-for="char in characters"
-            :key="char.name"
+            :key="char.id || char.name"
             class="character-slide"
           >
             <div class="slide-content">
@@ -27,19 +27,19 @@
                   <span class="char-role">{{ char.role }}</span>
                 </div>
 
-                <div v-if="!getCharacterData(char.name).imageUrl" class="placeholder-image">
+                <div v-if="!getCharacterData(char).imageUrl" class="placeholder-image">
                   <span>待生成</span>
                 </div>
-                <img v-else :src="getMediaUrl(getCharacterData(char.name).imageUrl)" :alt="char.name" class="character-image" />
+                <img v-else :src="getMediaUrl(getCharacterData(char).imageUrl)" :alt="char.name" class="character-image" />
 
                 <!-- 底部操作栏覆盖在图片上 -->
                 <div class="image-overlay-footer">
                   <button
                     class="generate-btn"
-                    @click="generateOne(char.name)"
+                    @click="generateOne(char)"
                     :disabled="anyLoading"
                   >
-                    {{ getCharacterData(char.name).loading ? '生成中...' : (getCharacterData(char.name).imageUrl ? '重新生成' : '生成人设') }}
+                    {{ getCharacterData(char).loading ? '生成中...' : (getCharacterData(char).imageUrl ? '重新生成' : '生成人设') }}
                   </button>
                 </div>
               </div>
@@ -81,6 +81,7 @@ import { useStoryStore } from '../stores/story.js'
 import { useSettingsStore } from '../stores/settings.js'
 import { generateCharacterImage, generateAllCharacterImages, getCharacterImages } from '../api/story.js'
 import ApiKeyModal from './ApiKeyModal.vue'
+import { findCharacterByRef, findCharacterImageEntry, getCharacterKey } from '../utils/character.js'
 
 const props = defineProps({
   characters: {
@@ -125,11 +126,13 @@ const anyLoading = computed(() =>
   isGenerating.value || Object.values(characterData).some(d => d.loading)
 )
 
-function getCharacterData(name) {
-  if (!characterData[name]) {
-    characterData[name] = { imageUrl: null, loading: false }
+function getCharacterData(character) {
+  const key = typeof character === 'string' ? character : getCharacterKey(character)
+  if (!key) return { imageUrl: null, loading: false }
+  if (!characterData[key]) {
+    characterData[key] = { imageUrl: null, loading: false }
   }
-  return characterData[name]
+  return characterData[key]
 }
 
 function resetCharacterData() {
@@ -155,16 +158,30 @@ function goTo(index) {
   currentIndex.value = index
 }
 
-async function generateOne(name) {
-  const char = props.characters.find(c => c.name === name)
+async function generateOne(char) {
   if (!char || !store.storyId) return
+  if (!char.id) {
+    error.value = `角色「${char.name || '未命名'}」缺少 ID，已阻止按名字复用人设图`
+    return
+  }
 
-  const data = getCharacterData(name)
+  const key = getCharacterKey(char)
+  const data = getCharacterData(key)
   data.loading = true
 
   try {
     const result = await generateCharacterImage(store.storyId, char)
     data.imageUrl = result.image_url
+    store.characterImages = {
+      ...(store.characterImages || {}),
+      [result.character_id || key]: {
+        ...(store.characterImages?.[result.character_id || key] || {}),
+        image_url: result.image_url,
+        prompt: result.prompt,
+        character_id: result.character_id || char.id || '',
+        character_name: char.name,
+      },
+    }
     error.value = ''
   } catch (e) {
     console.error('Failed to generate character image:', e)
@@ -180,16 +197,30 @@ async function generateAll() {
   isGenerating.value = true
 
   for (const char of props.characters) {
-    getCharacterData(char.name).loading = true
+    getCharacterData(char).loading = true
   }
 
   try {
     const { results, errors } = await generateAllCharacterImages(store.storyId, props.characters)
+    const nextCharacterImages = { ...(store.characterImages || {}) }
     for (const result of results) {
-      const data = getCharacterData(result.character_name)
+      const char = findCharacterByRef(props.characters, {
+        id: result.character_id,
+      })
+      const key = result.character_id || getCharacterKey(char)
+      if (!key) continue
+      const data = getCharacterData(key)
       data.imageUrl = result.image_url
       data.loading = false
+      nextCharacterImages[key] = {
+        ...(nextCharacterImages[key] || {}),
+        image_url: result.image_url,
+        prompt: result.prompt,
+        character_id: result.character_id || char?.id || '',
+        character_name: char?.name || result.character_name,
+      }
     }
+    store.characterImages = nextCharacterImages
     if (errors && errors.length > 0) {
       const names = errors.map(e => e.character_name).join('、')
       error.value = `以下角色生成失败: ${names}`
@@ -202,7 +233,7 @@ async function generateAll() {
   } finally {
     isGenerating.value = false
     for (const char of props.characters) {
-      getCharacterData(char.name).loading = false
+      getCharacterData(char).loading = false
     }
   }
 }
@@ -210,23 +241,29 @@ async function generateAll() {
 async function loadExistingImages() {
   if (!store.storyId) return
 
-  // 优先使用 store 中已加载的 characterImages（历史剧本恢复时已填充）
-  if (store.characterImages && Object.keys(store.characterImages).length > 0) {
-    for (const [name, data] of Object.entries(store.characterImages)) {
-      getCharacterData(name).imageUrl = data.image_url
-    }
-    return
-  }
-
   try {
     const { character_images } = await getCharacterImages(store.storyId)
     if (character_images) {
-      for (const [name, data] of Object.entries(character_images)) {
-        getCharacterData(name).imageUrl = data.image_url
+      store.characterImages = character_images
+      for (const char of props.characters) {
+        const data = findCharacterImageEntry(character_images, char)
+        if (data?.image_url) {
+          getCharacterData(char).imageUrl = data.image_url
+        }
       }
+      return
     }
   } catch (e) {
     console.log('No existing character images')
+  }
+
+  if (store.characterImages && Object.keys(store.characterImages).length > 0) {
+    for (const char of props.characters) {
+      const data = findCharacterImageEntry(store.characterImages, char)
+      if (data?.image_url) {
+        getCharacterData(char).imageUrl = data.image_url
+      }
+    }
   }
 }
 
@@ -236,6 +273,11 @@ watch(() => store.storyId, (newId, oldId) => {
     resetCharacterData()
     loadExistingImages()
   }
+})
+
+watch(() => props.characters.map(char => `${char.id || ''}:${char.name}`), () => {
+  resetCharacterData()
+  loadExistingImages()
 })
 
 onMounted(loadExistingImages)

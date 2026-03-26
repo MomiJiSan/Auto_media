@@ -208,7 +208,7 @@ async def generate_character_image(
     image_base_url: str = "",
     art_style: str = "",
 ) -> dict:
-    """Generate character design image. Returns { character_name, image_path, image_url, prompt }."""
+    """Generate a standard three-view character sheet. Returns { character_name, image_path, image_url, prompt }."""
     prompt = build_character_prompt(character_name, role, description)
     prompt = inject_art_style(prompt, art_style)
     base_url = image_base_url or settings.siliconflow_base_url

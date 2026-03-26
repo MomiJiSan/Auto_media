@@ -16,20 +16,20 @@
       <div class="characters">
         <div
           v-for="c in characters"
-          :key="c.name"
+          :key="c.id || c.name"
           class="char-card"
-          :class="{ editing: editingChar === c.name }"
+          :class="{ editing: editingChar === (c.id || c.name) }"
         >
           <div class="char-header">
             <div class="char-main" @dblclick="startEditChar(c)">
-              <template v-if="editingChar === c.name">
+              <template v-if="editingChar === (c.id || c.name)">
                 <div class="char-edit-row">
                   <span class="char-name-static">{{ c.name }}</span>
                   <span class="char-role">{{ c.role }}</span>
                 </div>
                 <textarea v-model="editCharDesc" class="edit-char-desc" rows="2" @keydown.esc="cancelEditChar" />
                 <div class="edit-actions">
-                  <button class="save-btn" @click="saveEditChar(c.name)">保存</button>
+                  <button class="save-btn" @click="saveEditChar(c)">保存</button>
                   <button class="cancel-btn" @click="cancelEditChar">取消</button>
                 </div>
               </template>
@@ -94,6 +94,7 @@ import { useStoryStore } from '../stores/story.js'
 import { refineStory } from '../api/story.js'
 import CharacterChatPanel from './CharacterChatPanel.vue'
 import EpisodeChatPanel from './EpisodeChatPanel.vue'
+import { findCharacterByRef, getCharacterKey } from '../utils/character.js'
 
 defineProps({ meta: Object, characters: Array, outline: Array })
 
@@ -129,16 +130,20 @@ function cancelEdit() {
 }
 
 function startEditChar(c) {
-  editingChar.value = c.name
+  editingChar.value = getCharacterKey(c)
   editCharDesc.value = c.description
 }
 
-function saveEditChar(name) {
-  const c = store.characters.find(ch => ch.name === name)
+function saveEditChar(character) {
+  if (!character?.id) {
+    return
+  }
+  const key = character.id
+  const c = findCharacterByRef(store.characters, character)
   const oldDesc = c ? c.description : ''
-  store.updateCharacter(name, editCharDesc.value)
+  store.updateCharacter(key, { description: editCharDesc.value })
   editingChar.value = null
-  refineStory(store.storyId, 'character', `角色「${name}」描述从「${oldDesc}」改为「${editCharDesc.value}」`)
+  refineStory(store.storyId, 'character', `角色「${character.name}」描述从「${oldDesc}」改为「${editCharDesc.value}」`)
     .then(res => { if (res) store.applyRefine(res) })
 }
 

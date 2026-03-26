@@ -166,6 +166,14 @@ async def mock_generate_outline(story_id: str, selected_setting: str, db: AsyncS
             "relationships": MOCK_OUTLINE["relationships"],
             "outline": MOCK_OUTLINE["outline"],
         })
+        latest_story = await repo.get_story(db, story_id)
+        return {
+            "story_id": story_id,
+            "meta": latest_story.get("meta"),
+            "characters": latest_story.get("characters", []),
+            "relationships": latest_story.get("relationships", []),
+            "outline": latest_story.get("outline", []),
+        }
     return {"story_id": story_id, **MOCK_OUTLINE}
 
 

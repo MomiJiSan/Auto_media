@@ -75,8 +75,12 @@ export async function startStoryboard(storyId, script, provider) {
   return res.json()
 }
 
-export async function getPipelineStatus(storyId) {
-  const res = await fetch(getPipelineUrl(`/${storyId}/status`), { headers: getHeaders() })
+export async function getPipelineStatus(projectId, { pipelineId = '', storyId = '' } = {}) {
+  const searchParams = new URLSearchParams()
+  if (pipelineId) searchParams.set('pipeline_id', pipelineId)
+  if (storyId) searchParams.set('story_id', storyId)
+  const query = searchParams.toString() ? `?${searchParams.toString()}` : ''
+  const res = await fetch(getPipelineUrl(`/${projectId}/status${query}`), { headers: getHeaders() })
   if (!res.ok) throw new Error(`请求失败 (${res.status})`)
   return res.json()
 }
@@ -262,6 +266,7 @@ export async function generateCharacterImage(storyId, character) {
     headers: getHeaders(),
     body: JSON.stringify({
       story_id: storyId,
+      character_id: character.id || null,
       character_name: character.name,
       role: character.role || '',
       description: character.description || '',
