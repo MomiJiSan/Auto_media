@@ -460,10 +460,11 @@ def build_character_reference_anchor(
     design_prompt = get_character_design_prompt(character_images, character_id, name=name)
     prompt_description = _extract_design_prompt_description(design_prompt)
     prompt_anchor_source = _clean_design_prompt_anchor_source(design_prompt)
+    prompt_fallback_description = prompt_description or prompt_anchor_source or normalized_description
     if visual_dna_body:
         clothing = sanitize_default_clothing(
             "",
-            fallback_description=prompt_description or prompt_anchor_source or normalized_description,
+            fallback_description=prompt_fallback_description,
         )
         merged = _merge_visual_bits(visual_dna_body, clothing)
         if merged:
@@ -471,17 +472,12 @@ def build_character_reference_anchor(
 
     body = sanitize_body_features(
         prompt_description,
-        fallback_description=prompt_description or prompt_anchor_source or normalized_description,
+        fallback_description=prompt_fallback_description,
     )
     clothing = sanitize_default_clothing(
-            "",
-            fallback_description=normalized_description,
-        )
-    if prompt_description or prompt_anchor_source:
-        clothing = sanitize_default_clothing(
-            "",
-            fallback_description=prompt_description or prompt_anchor_source or normalized_description,
-        )
+        "",
+        fallback_description=prompt_fallback_description,
+    )
     merged = _merge_visual_bits(body, clothing)
     if merged:
         return merged

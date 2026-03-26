@@ -14,6 +14,19 @@ class CharacterPromptTests(unittest.TestCase):
         self.assertIn("no text, no captions, no labels, no watermark, no logo", prompt)
         self.assertIn("no foreground obstruction", prompt)
         self.assertIn("same wearing position across all three views", prompt)
+        self.assertIn("non-negotiable identity constraints", prompt)
+        self.assertNotIn("photorealistic", prompt)
+
+    def test_build_character_prompt_includes_explicit_style_lock(self):
+        prompt = build_character_prompt(
+            "李明",
+            "主角",
+            "青年男子，黑色短发，身形清瘦，穿着深蓝长衫。",  # noqa: RUF001
+            art_style="国风工笔重彩插画，克制冷色调，电影级轮廓光",  # noqa: RUF001
+        )
+
+        self.assertIn("style lock: 国风工笔重彩插画，克制冷色调，电影级轮廓光", prompt)  # noqa: RUF001
+        self.assertIn("follow this exact art style consistently across all three views", prompt)
 
     def test_build_character_section_prefers_visual_dna(self):
         section = build_character_section(

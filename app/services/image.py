@@ -25,7 +25,10 @@ CHARACTER_SIZE = "1024x1024"
 CHARACTER_NEGATIVE_PROMPT = (
     "text, captions, labels, watermark, logo, speech bubble, poster, signboard, "
     "extra props, unrelated objects, foreground obstruction, hands covering face, "
-    "cropped body, close-up portrait, half body, missing feet, missing limbs, duplicate person, inconsistent outfit"
+    "cropped body, close-up portrait, half body, missing feet, missing limbs, duplicate person, inconsistent outfit, "
+    "inconsistent costume color, inconsistent costume material, inconsistent hairstyle, inconsistent facial features, "
+    "style drift, mixed art styles, mixed media rendering, generic fashion model face, glamour beauty makeup, "
+    "dramatic action pose, cinematic environment background"
 )
 
 # 火山方舟要求最少 3,686,400 像素（SiliconFlow 无此限制）
@@ -214,8 +217,7 @@ async def generate_character_image(
     art_style: str = "",
 ) -> dict:
     """Generate a standard three-view character sheet. Returns { character_name, image_path, image_url, prompt }."""
-    prompt = build_character_prompt(character_name, role, description)
-    prompt = inject_art_style(prompt, art_style)
+    prompt = build_character_prompt(character_name, role, description, art_style=art_style)
     base_url = image_base_url or settings.siliconflow_base_url
     if image_base_url and not image_api_key:
         raise HTTPException(status_code=400, detail="提供自定义 image_base_url 时必须同时提供 image_api_key")

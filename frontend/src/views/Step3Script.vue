@@ -109,7 +109,16 @@ async function startGenerate() {
   await streamScript(
     store.storyId,
     (scene) => store.addScene(scene),
-    () => { streaming.value = false; store.step3Done = true; store.setStep(4) },
+    () => {
+      streaming.value = false
+      if (!store.scenes.length) {
+        store.step3Done = false
+        error.value = '未生成有效剧本内容，请重试'
+        return
+      }
+      store.step3Done = true
+      store.setStep(4)
+    },
     (msg) => {
       streaming.value = false
       store.step3Done = false

@@ -58,6 +58,7 @@ function normalizeCharacterChatLabels(text) {
 function splitSectionItems(text) {
   const items = String(text || '')
     .split(/[；;]+/)
+    .flatMap(item => item.replace(/\s+(?=\d+[.)．]\s*)/g, '\n').split('\n'))
     .map(item => item.replace(/^[、\-•\d.\s]+/, '').trim())
     .filter(Boolean)
 
@@ -79,6 +80,10 @@ function isStoryImpactItem(item) {
   return /剧情|主线|冲突|后续|联动|影响|第\s*\d+\s*集|故事|情节|反转|结局/.test(String(item || ''))
 }
 
+function isCharacterChangeItem(item) {
+  return /修改|强化|调整|补充/.test(String(item || ''))
+}
+
 function pushUniqueItems(target, items) {
   for (const item of items) {
     const normalized = String(item || '').trim()
@@ -94,6 +99,13 @@ function extractLabeledSection(text, label, nextLabels = []) {
 
   const contentStart = start + label.length
   let contentEnd = normalized.length
+
+  if (!nextLabels.length) {
+    const nextLineBreak = normalized.indexOf('\n', contentStart)
+    if (nextLineBreak !== -1) {
+      contentEnd = nextLineBreak
+    }
+  }
 
   for (const nextLabel of nextLabels) {
     const nextIndex = normalized.indexOf(nextLabel, contentStart)
@@ -157,13 +169,27 @@ export function parseCharacterChatSections(text) {
       continue
     }
 
-    if (!characterChanges.length && /修改|强化|调整|补充/.test(line) && !/剧情|主线|冲突|后续|联动|影响/.test(line)) {
-      pushUniqueItems(characterChanges, splitSectionItems(line))
-      continue
+    const looseItems = splitSectionItems(line)
+    let handledLooseItems = false
+
+    for (const item of looseItems) {
+      const hasCharacterChangeContext = isCharacterChangeItem(item)
+      const hasStoryImpactContext = isStoryImpactItem(item)
+
+      if (hasStoryImpactContext) {
+        pushUniqueItems(storyImpact, [item])
+        handledLooseItems = true
+        continue
+      }
+
+      if (hasCharacterChangeContext) {
+        pushUniqueItems(characterChanges, [item])
+        handledLooseItems = true
+      }
     }
 
-    if (!storyImpact.length && /剧情|主线|冲突|后续|联动|影响/.test(line)) {
-      pushUniqueItems(storyImpact, splitSectionItems(line))
+    if (handledLooseItems) {
+      continue
     }
   }
 

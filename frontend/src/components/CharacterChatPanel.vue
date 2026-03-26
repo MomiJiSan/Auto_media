@@ -171,8 +171,8 @@ async function confirmApply() {
       store.characters,
       null
     )
-    if (!res || (!res.name && !res.role && !res.description)) {
-      error.value = '未能获取修改结果，请重试'
+    if (!res?.description) {
+      error.value = '未能获取角色描述修改结果，请重试'
       return
     }
     const previousDescription = currentChar.description
@@ -181,14 +181,24 @@ async function confirmApply() {
       description: nextDescription,
     })
     if (nextDescription !== previousDescription) {
-      const refineRes = await refineStory(
-        store.storyId,
-        'character',
-        buildCharacterRefineSummary(currentChar, previousDescription, nextDescription)
-      )
-      if (refineRes) {
-        store.applyRefine(refineRes)
+      let refineRes = null
+      try {
+        refineRes = await refineStory(
+          store.storyId,
+          'character',
+          buildCharacterRefineSummary(currentChar, previousDescription, nextDescription)
+        )
+      } catch (refineError) {
+        console.error('[CharacterChatPanel] refineStory 失败:', refineError)
+        error.value = '角色描述已更新，但剧情联动失败，请重试'
+        return
       }
+      if (!refineRes) {
+        console.error('[CharacterChatPanel] refineStory 返回空结果')
+        error.value = '角色描述已更新，但剧情联动失败，请重试'
+        return
+      }
+      store.applyRefine(refineRes)
     }
     messages.value = []
     input.value = ''
