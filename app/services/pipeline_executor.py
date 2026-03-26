@@ -281,7 +281,7 @@ class PipelineExecutor:
         characters = character_info.get("characters", [])
         character_images = character_info.get("character_images", {})
 
-        if not characters or not character_images:
+        if not characters:
             return visual_prompt
 
         additions = []

@@ -53,7 +53,7 @@ _VIEW_HINT_PATTERNS: dict[str, tuple[str, ...]] = {
         "side view",
         "side profile",
         "profile view",
-        "profile",
+        "in profile",
         "侧面",
         "侧身",
     ),
@@ -817,7 +817,7 @@ def infer_shot_view_hint(name: str, shot: ShotLike) -> str:
         len(structured_names) == 1
         and structured_names[0].casefold() == normalized_name.casefold()
     )
-    if not contexts and is_structured_single_character_shot:
+    if is_structured_single_character_shot:
         fallback_parts = [
             _get_visual_field(shot, "action_and_expression"),
             _get_visual_field(shot, "subject_and_clothing"),

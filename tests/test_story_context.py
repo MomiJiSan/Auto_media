@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.database import Base
 from app.core.story_assets import build_character_asset_record, get_character_design_prompt, get_character_visual_dna
-from app.core.story_context import _GENRE_STYLE_RULES, build_generation_payload, build_story_context, character_appears_in_shot
+from app.core.story_context import _GENRE_STYLE_RULES, build_generation_payload, build_story_context, character_appears_in_shot, infer_shot_view_hint
 from app.models.story import Story
 from app.schemas.storyboard import AudioReference, CameraSetup, Shot, VisualElements
 from app.services import story_context_service
@@ -162,6 +162,27 @@ class StoryContextTests(unittest.TestCase):
         }
         self.assertTrue(character_appears_in_shot("Li Ming", shot))
         self.assertFalse(character_appears_in_shot("Li", shot))
+
+    def test_infer_shot_view_hint_ignores_generic_profile_phrases(self):
+        shot = {
+            "storyboard_description": "Li Ming keeps a low profile while moving through the market.",
+            "image_prompt": "Medium shot. Li Ming keeps a low profile in the crowd.",
+        }
+
+        self.assertEqual(infer_shot_view_hint("Li Ming", shot), "")
+
+    def test_infer_shot_view_hint_uses_structured_single_character_fields_even_with_existing_contexts(self):
+        shot = {
+            "characters": [{"name": "Li Ming"}],
+            "storyboard_description": "Li Ming pauses at the doorway.",
+            "image_prompt": "Medium shot. Li Ming pauses at the doorway.",
+            "visual_elements": {
+                "subject_and_clothing": "young man in a dark blue robe",
+                "action_and_expression": "seen from behind while turning toward the doorway",
+            },
+        }
+
+        self.assertEqual(infer_shot_view_hint("Li Ming", shot), "match the shot's back view")
 
     def test_genre_fallback_style_still_applies_when_scene_cache_keywords_do_not_match(self):
         story = {

@@ -215,6 +215,26 @@ class PipelineRuntimeHelperTests(unittest.TestCase):
         self.assertEqual(captured_shot["visual_elements"]["subject_and_clothing"], visual_prompt)
         self.assertEqual(captured_shot["visual_elements"]["action_and_expression"], visual_prompt)
 
+    def test_legacy_character_prompt_enhancement_still_uses_description_without_character_assets(self):
+        prompt = PipelineExecutor._enhance_prompt_with_character(
+            "Medium shot. Li Ming pauses at the doorway.",
+            {
+                "characters": [
+                    {
+                        "id": "char_li_ming",
+                        "name": "Li Ming",
+                        "description": "young man, short black hair, wearing a dark blue robe.",
+                    }
+                ],
+                "character_images": {},
+            },
+        )
+
+        self.assertIn("[Character Li Ming:", prompt)
+        self.assertIn("young man", prompt)
+        self.assertIn("short black hair", prompt)
+        self.assertIn("dark blue robe", prompt)
+
 
 class PipelineStatusLookupTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
