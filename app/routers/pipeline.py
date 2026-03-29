@@ -1,7 +1,8 @@
 import logging
 import re
-from uuid import uuid4
 from pathlib import Path
+from urllib.parse import urlsplit
+from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -75,6 +76,45 @@ def _normalize_optional_id(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _resolve_concat_video_local_path(video_url: str, base_url: str, video_dir: Path) -> str:
+    normalized_url = str(video_url or "").strip()
+    if not normalized_url:
+        raise HTTPException(status_code=400, detail="Video URL is empty")
+
+    parsed_url = urlsplit(normalized_url)
+    if parsed_url.scheme or parsed_url.netloc:
+        parsed_base = urlsplit(base_url or "")
+        if (
+            parsed_url.scheme.lower(),
+            parsed_url.netloc.lower(),
+        ) != (
+            parsed_base.scheme.lower(),
+            parsed_base.netloc.lower(),
+        ):
+            raise HTTPException(status_code=400, detail=f"Invalid video URL: {video_url}")
+        media_path = parsed_url.path
+    else:
+        media_path = parsed_url.path or normalized_url
+
+    normalized_path = f"/{(media_path or '').lstrip('/')}"
+    if not normalized_path.startswith("/media/videos/"):
+        raise HTTPException(status_code=400, detail=f"Invalid video URL: {video_url}")
+
+    from app.services.ffmpeg import url_to_local_path
+
+    local_path = Path(url_to_local_path(normalized_path, base_url))
+    resolved_video_dir = video_dir.resolve(strict=False)
+    try:
+        resolved_local_path = local_path.resolve(strict=False)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid video URL: {video_url}") from exc
+
+    if not resolved_local_path.is_relative_to(resolved_video_dir):
+        raise HTTPException(status_code=400, detail=f"Invalid video URL: {video_url}")
+
+    return str(resolved_local_path)
 
 
 async def _load_pipeline_record(
@@ -1233,7 +1273,7 @@ async def concat_videos(
     story_id: str | None = Query(None, description="Stable story id for pipeline lookup"),
     db: AsyncSession = Depends(get_db),
 ):
-    from app.services.ffmpeg import VIDEO_DIR, url_to_local_path, concat_videos as do_concat
+    from app.services.ffmpeg import VIDEO_DIR, concat_videos as do_concat
 
     if not req.video_urls:
         raise HTTPException(status_code=400, detail="Video list is empty")
@@ -1241,7 +1281,7 @@ async def concat_videos(
     normalized_pipeline_id = _normalize_optional_id(pipeline_id)
     tracking_story_id = resolve_tracking_story_id(project_id, _normalize_optional_id(story_id))
     base_url = str(request.base_url).rstrip("/")
-    local_paths = [url_to_local_path(url, base_url) for url in req.video_urls]
+    local_paths = [_resolve_concat_video_local_path(url, base_url, VIDEO_DIR) for url in req.video_urls]
     output_path = str(VIDEO_DIR / f"episode_{project_id}.mp4")
     resolved_story_id = tracking_story_id
 

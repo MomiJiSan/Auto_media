@@ -23,6 +23,15 @@ SCENE_REFERENCE_NEGATIVE_PROMPT = (
 
 SCENE_REFERENCE_IMAGE_TIMEOUT_SECONDS = 180
 
+
+def _extract_timeout_exception(exc: Exception) -> httpx.TimeoutException | None:
+    if isinstance(exc, httpx.TimeoutException):
+        return exc
+    cause = getattr(exc, "__cause__", None)
+    if isinstance(cause, httpx.TimeoutException):
+        return cause
+    return None
+
 LOCATION_SUFFIXES = (
     "楼顶花园",
     "发布会现场",
@@ -808,6 +817,16 @@ async def generate_episode_scene_reference(
                         f"环境图生成超时：{group['group_label']} 生成时间过长，请重试。"
                     ),
                 ) from exc
+            except RuntimeError as exc:
+                timeout_exc = _extract_timeout_exception(exc)
+                if timeout_exc:
+                    raise HTTPException(
+                        status_code=504,
+                        detail=(
+                            f"环境图生成超时：{group['group_label']} 生成时间过长，请重试。"
+                        ),
+                    ) from timeout_exc
+                raise
             variant_results[variant] = {
                 "prompt": prompt_payload["prompt"],
                 "image_url": result["image_url"],

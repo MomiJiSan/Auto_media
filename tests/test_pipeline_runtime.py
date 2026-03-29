@@ -824,6 +824,27 @@ class ManualPipelineMainlineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("videos", final_status.generated_files)
         self.assertEqual(final_status.generated_files["final_video_url"], concat_response.video_url)
 
+    async def test_concat_videos_rejects_untrusted_video_urls(self):
+        request = self._make_request()
+
+        async with self.session_factory() as session:
+            for video_url in (
+                "http://evil.example/media/videos/scene1.mp4",
+                "http://testserver/media/videos/../../outside.mp4",
+            ):
+                with self.subTest(video_url=video_url):
+                    with self.assertRaises(HTTPException) as ctx:
+                        await concat_videos(
+                            project_id="manual-project",
+                            req=ConcatRequest(video_urls=[video_url]),
+                            request=request,
+                            pipeline_id=None,
+                            story_id=None,
+                            db=session,
+                        )
+
+                    self.assertEqual(ctx.exception.status_code, 400)
+
     async def test_generate_transition_uses_adjacent_videos_and_persists_timeline(self):
         project_id = "manual-project"
         story_id = "story-mainline"

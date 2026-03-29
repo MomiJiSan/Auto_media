@@ -125,7 +125,35 @@ async def _extract_frame(video_path: str, output_path: str, *frame_args: str) ->
     return output_path
 
 
+def _sanitize_image_output_name(raw_name: str | None, *, field_name: str) -> str:
+    raw_name = str(raw_name or "").strip()
+    if not raw_name:
+        raise ValueError(f"{field_name} 不能为空")
+
+    candidate = Path(raw_name)
+    if (
+        candidate.is_absolute()
+        or "/" in raw_name
+        or "\\" in raw_name
+        or ".." in candidate.parts
+        or "." in candidate.parts[:-1]
+    ):
+        raise ValueError(f"非法 {field_name}: {raw_name}")
+
+    sanitized_name = candidate.name
+    if not sanitized_name or sanitized_name in {".", ".."}:
+        raise ValueError(f"非法 {field_name}: {raw_name}")
+
+    return sanitized_name
+
+
 def _resolve_image_output_path(output_name: str | None, default_name: str) -> str:
+    sanitized_name = _sanitize_image_output_name(
+        output_name if output_name is not None else default_name,
+        field_name="output_name" if output_name is not None else "default_name",
+    )
+    return str(IMAGE_DIR / sanitized_name)
+
     if output_name is None:
         return str(IMAGE_DIR / default_name)
 

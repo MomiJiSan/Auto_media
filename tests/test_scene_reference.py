@@ -178,6 +178,41 @@ class SceneReferenceRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.status_code, 504)
         self.assertIn("环境图生成超时", ctx.exception.detail)
 
+    async def test_generate_episode_scene_reference_converts_wrapped_timeout_to_gateway_timeout(self):
+        story = {
+            "id": "story-scene-ref-timeout-wrapped",
+            "meta": {},
+            "scenes": [
+                {
+                    "episode": 1,
+                    "title": "Episode 1",
+                    "scenes": [
+                        {"scene_number": 1, "environment": "courtyard", "visual": "rainy courtyard at night"},
+                    ],
+                }
+            ],
+        }
+
+        async def _raise_wrapped_timeout(*args, **kwargs):
+            try:
+                raise httpx.ReadTimeout("timed out")
+            except httpx.TimeoutException as exc:
+                raise RuntimeError("wrapped image timeout") from exc
+
+        with patch(
+            "app.services.scene_reference.generate_image",
+            new=AsyncMock(side_effect=_raise_wrapped_timeout),
+        ):
+            with self.assertRaises(HTTPException) as ctx:
+                await generate_episode_scene_reference(
+                    story,
+                    story_context=None,
+                    episode=1,
+                )
+
+        self.assertEqual(ctx.exception.status_code, 504)
+        self.assertIn("环境图生成超时", ctx.exception.detail)
+
     async def test_generate_episode_scene_reference_reuses_existing_asset_for_minor_scene_tweaks(self):
         story = {
             "id": "story-scene-ref-reuse",
