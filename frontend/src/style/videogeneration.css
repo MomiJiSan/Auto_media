@@ -555,6 +555,7 @@ h1 {
 }
 
 .secondary-btn:hover {
+  background: #fff;
   border-color: #6c63ff;
   color: #6c63ff;
 }
@@ -788,7 +789,7 @@ button {
   transition: background 0.2s;
 }
 
-button:hover:not(:disabled) {
+button:hover:where(:not(:disabled)) {
   background: #5a52e0;
 }
 
