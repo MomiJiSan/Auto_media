@@ -988,8 +988,6 @@ button:disabled {
   color: #8b7750;
   text-align: right;
   overflow-wrap: break-word;
-  word-wrap: break-word;
-  word-break: break-word;
 }
 
 .transition-title {

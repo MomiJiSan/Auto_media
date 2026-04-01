@@ -7,15 +7,15 @@
         type="button"
         class="step-item"
         :class="{
-          active: current === step.id,
-          done: current > step.id,
-          clickable: !loading && current !== step.id && canGoStep(step),
+          active: normalizedCurrent === step.id,
+          done: normalizedCurrent > step.id,
+          clickable: !loading && normalizedCurrent !== step.id && canGoStep(step),
         }"
-        :aria-current="current === step.id ? 'step' : undefined"
-        :disabled="loading || !canGoStep(step)"
+        :aria-current="normalizedCurrent === step.id ? 'step' : undefined"
+        :disabled="loading || step.id === normalizedCurrent || !canGoStep(step)"
         @click="goStep(step)"
       >
-        <span class="step-dot">{{ current > step.id ? '✓' : step.id }}</span>
+        <span class="step-dot">{{ normalizedCurrent > step.id ? '✓' : step.id }}</span>
         <span class="step-text">
           <span class="step-kicker">Step {{ step.id }}</span>
           <span class="step-label">{{ step.label }}</span>
@@ -30,7 +30,7 @@
         <span class="usage-unit">tokens</span>
         <span class="usage-detail">↑{{ store.usage.prompt_tokens.toLocaleString() }} ↓{{ store.usage.completion_tokens.toLocaleString() }}</span>
       </div>
-      <button v-if="current > 1" class="back-top-btn" @click="goBack" :disabled="loading">← 上一步</button>
+      <button v-if="normalizedCurrent > 1" class="back-top-btn" @click="goBack" :disabled="loading">← 上一步</button>
       <button class="settings-btn" @click="router.push('/settings')" :disabled="loading">⚙ 设置</button>
     </div>
   </div>
@@ -50,7 +50,12 @@ const steps = [
   { id: 4, label: '预览导出', route: '/step4' },
   { id: 5, label: '视频生成', route: '/video-generation' },
 ]
-const lineTransform = computed(() => `scaleX(${Math.max(0, (props.current - 1) / (steps.length - 1))})`)
+const normalizedCurrent = computed(() => {
+  const current = Math.round(Number(props.current))
+  if (!Number.isFinite(current)) return 1
+  return Math.min(steps.length, Math.max(1, current))
+})
+const lineTransform = computed(() => `scaleX(${(normalizedCurrent.value - 1) / (steps.length - 1)})`)
 
 const router = useRouter()
 const store = useStoryStore()
@@ -58,12 +63,13 @@ const store = useStoryStore()
 const prevRoutes = { 2: '/step1', 3: '/step2', 4: '/step3', 5: '/step4' }
 
 function goBack() {
-  store.setStep(props.current - 1)
-  router.push(prevRoutes[props.current])
+  store.setStep(normalizedCurrent.value - 1)
+  router.push(prevRoutes[normalizedCurrent.value])
 }
 
 function goStep(step) {
   if (!step || props.loading || !canGoStep(step)) return
+  if (step.id === normalizedCurrent.value) return
   store.setStep(step.id)
   router.push(step.route)
 }
