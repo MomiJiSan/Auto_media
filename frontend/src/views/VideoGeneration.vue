@@ -453,6 +453,7 @@ import { generateEpisodeSceneReference, generatePipelineTransition, getHeaders, 
 import StepIndicator from '../components/StepIndicator.vue'
 import ApiKeyModal from '../components/ApiKeyModal.vue'
 import { resolveBackendBaseUrl, resolveBackendMediaUrl } from '../utils/backend.js'
+import { canAccessStep, getStepRedirectPath } from '../utils/stepAccess.js'
 
 const router = useRouter()
 const settings = useSettingsStore()
@@ -1898,6 +1899,11 @@ async function concatAllVideos() {
 }
 
 onMounted(async () => {
+  if (!canAccessStep(storyStore, 5)) {
+    router.replace(getStepRedirectPath(storyStore, 5))
+    return
+  }
+
   if (speechGenerationEnabled) {
     loadVoices()
   }

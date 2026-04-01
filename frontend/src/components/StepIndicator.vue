@@ -1,15 +1,5 @@
 <template>
   <div class="step-wrapper">
-    <div class="top-actions">
-      <div class="usage-badge">
-        <span class="usage-icon">⚡</span>
-        <span class="usage-num">{{ store.totalTokens.toLocaleString() }}</span>
-        <span class="usage-unit">tokens</span>
-        <span class="usage-detail">↑{{ store.usage.prompt_tokens.toLocaleString() }} ↓{{ store.usage.completion_tokens.toLocaleString() }}</span>
-      </div>
-      <button v-if="normalizedCurrent > 1" class="back-top-btn" @click="goBack" :disabled="loading">← 上一步</button>
-      <button class="settings-btn" @click="router.push('/settings')" :disabled="loading">⚙ 设置</button>
-    </div>
     <div class="step-indicator">
       <button
         v-for="step in steps"
@@ -19,9 +9,10 @@
         :class="{
           active: normalizedCurrent === step.id,
           done: normalizedCurrent > step.id,
-          clickable: !loading && normalizedCurrent !== step.id,
+          clickable: !loading && normalizedCurrent !== step.id && canGoStep(step),
         }"
-        :disabled="loading || step.id === normalizedCurrent"
+        :aria-current="normalizedCurrent === step.id ? 'step' : undefined"
+        :disabled="loading || step.id === normalizedCurrent || !canGoStep(step)"
         @click="goStep(step)"
       >
         <span class="step-dot">{{ normalizedCurrent > step.id ? '✓' : step.id }}</span>
@@ -32,6 +23,16 @@
       </button>
       <div class="step-line" :style="{ transform: lineTransform }"></div>
     </div>
+    <div class="top-actions">
+      <div class="usage-badge">
+        <span class="usage-icon">⚡</span>
+        <span class="usage-num">{{ store.totalTokens.toLocaleString() }}</span>
+        <span class="usage-unit">tokens</span>
+        <span class="usage-detail">↑{{ store.usage.prompt_tokens.toLocaleString() }} ↓{{ store.usage.completion_tokens.toLocaleString() }}</span>
+      </div>
+      <button v-if="normalizedCurrent > 1" class="back-top-btn" @click="goBack" :disabled="loading">← 上一步</button>
+      <button class="settings-btn" @click="router.push('/settings')" :disabled="loading">⚙ 设置</button>
+    </div>
   </div>
 </template>
 
@@ -39,6 +40,7 @@
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useStoryStore } from '../stores/story.js'
+import { canAccessStep } from '../utils/stepAccess.js'
 
 const props = defineProps({ current: Number, loading: Boolean })
 const steps = [
@@ -66,9 +68,14 @@ function goBack() {
 }
 
 function goStep(step) {
-  if (!step || props.loading || step.id === normalizedCurrent.value) return
+  if (!step || props.loading || !canGoStep(step)) return
+  if (step.id === normalizedCurrent.value) return
   store.setStep(step.id)
   router.push(step.route)
+}
+
+function canGoStep(step) {
+  return canAccessStep(store, step?.id)
 }
 </script>
 
