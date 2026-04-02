@@ -372,6 +372,94 @@ def _usage_dict(usage: Any) -> dict[str, int] | None:
     }
 
 
+EXPECTED_OUTLINE_EPISODES = (1, 2, 3, 4, 5, 6)
+
+
+def _normalize_required_outline_text(value: Any, *, field_name: str, episode_number: int) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise ValueError(f"第 {episode_number} 集缺少有效的 {field_name}")
+    return normalized
+
+
+def _normalize_required_outline_text_list(value: Any, *, field_name: str, episode_number: int) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"第 {episode_number} 集缺少有效的 {field_name}")
+
+    normalized_items: list[str] = []
+    for item in value:
+        normalized = str(item or "").strip()
+        if not normalized:
+            raise ValueError(f"第 {episode_number} 集的 {field_name} 包含空条目")
+        normalized_items.append(normalized)
+    return normalized_items
+
+
+def _validate_generated_outline_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("返回结果必须是 JSON 对象")
+
+    meta = payload.get("meta")
+    if not isinstance(meta, dict):
+        raise ValueError("meta 必须存在且为对象")
+
+    if _normalize_episode_number(meta.get("episodes")) != len(EXPECTED_OUTLINE_EPISODES):
+        raise ValueError("meta.episodes 必须等于 6")
+
+    outline = payload.get("outline")
+    if not isinstance(outline, list):
+        raise ValueError("outline 必须存在且为数组")
+    if len(outline) != len(EXPECTED_OUTLINE_EPISODES):
+        raise ValueError("outline 必须完整包含 6 集")
+
+    normalized_outline: list[dict[str, Any]] = []
+    returned_episodes: list[int] = []
+    for entry in outline:
+        if not isinstance(entry, dict):
+            raise ValueError("outline 中的每一项都必须是对象")
+
+        episode_number = _normalize_episode_number(entry.get("episode"))
+        if episode_number is None:
+            raise ValueError("outline 中存在缺少 episode 的条目")
+
+        normalized_entry = {
+            **entry,
+            "episode": episode_number,
+            "title": _normalize_required_outline_text(
+                entry.get("title"),
+                field_name="title",
+                episode_number=episode_number,
+            ),
+            "summary": _normalize_required_outline_text(
+                entry.get("summary"),
+                field_name="summary",
+                episode_number=episode_number,
+            ),
+            "beats": _normalize_required_outline_text_list(
+                entry.get("beats"),
+                field_name="beats",
+                episode_number=episode_number,
+            ),
+            "scene_list": _normalize_required_outline_text_list(
+                entry.get("scene_list"),
+                field_name="scene_list",
+                episode_number=episode_number,
+            ),
+        }
+        normalized_outline.append(normalized_entry)
+        returned_episodes.append(episode_number)
+
+    expected_episodes = list(EXPECTED_OUTLINE_EPISODES)
+    if returned_episodes != expected_episodes:
+        raise ValueError("outline.episode 必须按 1, 2, 3, 4, 5, 6 连续返回")
+
+    return {
+        **payload,
+        "meta": {**meta, "episodes": len(EXPECTED_OUTLINE_EPISODES)},
+        "outline": normalized_outline,
+    }
+
+
 def _parse_json(content: str):
     import json as _json
     content = content.strip()
@@ -417,12 +505,12 @@ async def refine(story_id: str, change_type: str, change_summary: str, db: Async
         tracker.record_failure(exc)
         raise
     response_text = resp.choices[0].message.content
-    tracker.record_success(usage=getattr(resp, "usage", None), response_text=response_text)
+    usage = getattr(resp, "usage", None)
     try:
         data = _parse_json(response_text)
-    except Exception:
+    except Exception as exc:
+        tracker.record_failure(exc, usage=usage, response_text=response_text)
         return {"characters": None, "relationships": None, "outline": None, "meta_theme": None}
-    usage = resp.usage
 
     # 写回数据库，保持 DB 与前端状态同步
     updates = {}
@@ -434,38 +522,45 @@ async def refine(story_id: str, change_type: str, change_summary: str, db: Async
             )
             updates["characters"] = _merge_characters(list(story.get("characters") or []), sanitized_characters)
     except ValueError as exc:
+        tracker.record_failure(exc, usage=usage, response_text=response_text)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    if data.get("relationships") is not None:
-        updates["relationships"] = data["relationships"]
-    if data.get("outline") is not None:
-        existing_outline = list(story.get("outline") or [])
-        normalized_outline = [
-            _normalize_episode_outline_payload(
-                episode,
-                fallback_episode=_find_outline_episode(existing_outline, episode.get("episode")) if isinstance(episode, dict) else None,
-            )
-            for episode in list(data["outline"] or [])
-            if isinstance(episode, dict)
-        ]
-        updates["outline"] = _merge_outline(existing_outline, normalized_outline)
-    if data.get("meta_theme") is not None:
-        existing_meta = story.get("meta") or {}
-        updates["meta"] = {**existing_meta, "theme": data["meta_theme"]}
-    latest_story = story
-    if updates:
-        if "characters" in updates or "outline" in updates:
-            updates["scenes"] = []
-        await repo.save_story(db, story_id, updates)
-        invalidate_appearance = "characters" in updates
-        invalidate_scene_style = "outline" in updates
-        if invalidate_appearance or invalidate_scene_style:
-            await repo.invalidate_story_consistency_cache(
-                db,
-                story_id,
-                appearance=invalidate_appearance,
-                scene_style=invalidate_scene_style,
-            )
-        latest_story = await repo.get_story(db, story_id)
+    try:
+        if data.get("relationships") is not None:
+            updates["relationships"] = data["relationships"]
+        if data.get("outline") is not None:
+            existing_outline = list(story.get("outline") or [])
+            normalized_outline = [
+                _normalize_episode_outline_payload(
+                    episode,
+                    fallback_episode=_find_outline_episode(existing_outline, episode.get("episode")) if isinstance(episode, dict) else None,
+                )
+                for episode in list(data["outline"] or [])
+                if isinstance(episode, dict)
+            ]
+            updates["outline"] = _merge_outline(existing_outline, normalized_outline)
+        if data.get("meta_theme") is not None:
+            existing_meta = story.get("meta") or {}
+            updates["meta"] = {**existing_meta, "theme": data["meta_theme"]}
+        latest_story = story
+        if updates:
+            if "characters" in updates or "outline" in updates:
+                updates["scenes"] = []
+            await repo.save_story(db, story_id, updates)
+            invalidate_appearance = "characters" in updates
+            invalidate_scene_style = "outline" in updates
+            if invalidate_appearance or invalidate_scene_style:
+                await repo.invalidate_story_consistency_cache(
+                    db,
+                    story_id,
+                    appearance=invalidate_appearance,
+                    scene_style=invalidate_scene_style,
+                )
+            latest_story = await repo.get_story(db, story_id)
+    except Exception as exc:
+        tracker.record_failure(exc, usage=usage, response_text=response_text)
+        raise
+
+    tracker.record_success(usage=usage, response_text=response_text)
 
     return {
         "characters": latest_story.get("characters") if data.get("characters") is not None else None,
@@ -500,11 +595,15 @@ async def analyze_idea(idea: str, genre: str, tone: str, db: AsyncSession, api_k
         tracker.record_failure(exc)
         raise
     response_text = resp.choices[0].message.content
-    tracker.record_success(usage=getattr(resp, "usage", None), response_text=response_text)
-    data = _parse_json(response_text)
     story_id = str(uuid.uuid4())
-    await repo.save_story(db, story_id, {"idea": idea, "genre": genre, "tone": tone})
-    usage = resp.usage
+    usage = getattr(resp, "usage", None)
+    try:
+        data = _parse_json(response_text)
+        await repo.save_story(db, story_id, {"idea": idea, "genre": genre, "tone": tone})
+    except Exception as exc:
+        tracker.record_failure(exc, usage=usage, response_text=response_text)
+        raise
+    tracker.record_success(usage=usage, response_text=response_text)
     return {
         "story_id": story_id,
         "analysis": data.get("analysis", ""),
@@ -550,18 +649,30 @@ async def generate_outline(story_id: str, selected_setting: str, db: AsyncSessio
         tracker.record_failure(exc, response_text="".join(chunks))
         raise
     content = "".join(chunks)
+    try:
+        data = _parse_json(content)
+        validated_data = _validate_generated_outline_payload(data)
+        await repo.save_story(db, story_id, {
+            "selected_setting": selected_setting,
+            "meta": validated_data.get("meta"),
+            "characters": validated_data.get("characters", []),
+            "relationships": validated_data.get("relationships", []),
+            "outline": validated_data.get("outline", []),
+            "scenes": [],
+        })
+        await repo.invalidate_story_consistency_cache(db, story_id, appearance=True, scene_style=True)
+        latest_story = await repo.get_story(db, story_id)
+    except ValueError as exc:
+        tracker.record_failure(exc, response_text=content)
+        raise HTTPException(
+            status_code=502,
+            detail=f"大纲生成失败：模型返回的 outline 无效，{exc}",
+        ) from exc
+    except Exception as exc:
+        tracker.record_failure(exc, response_text=content)
+        raise
+
     tracker.record_success(response_text=content)
-    data = _parse_json(content)
-    await repo.save_story(db, story_id, {
-        "selected_setting": selected_setting,
-        "meta": data.get("meta"),
-        "characters": data.get("characters", []),
-        "relationships": data.get("relationships", []),
-        "outline": data.get("outline", []),
-        "scenes": [],
-    })
-    await repo.invalidate_story_consistency_cache(db, story_id, appearance=True, scene_style=True)
-    latest_story = await repo.get_story(db, story_id)
     return {
         "story_id": story_id,
         "meta": latest_story.get("meta"),
@@ -728,6 +839,20 @@ async def generate_script(story_id: str, db: AsyncSession, api_key: str = "", ba
             raise
 
         content = "".join(chunks)
+        try:
+            parsed_episode = _parse_json(content)
+        except Exception as exc:
+            tracker.record_failure(
+                exc,
+                usage={
+                    "prompt_tokens": episode_prompt_tokens,
+                    "completion_tokens": episode_completion_tokens,
+                },
+                response_text=content,
+            )
+            yield {"episode": ep["episode"], "title": ep["title"], "scenes": []}
+            continue
+
         tracker.record_success(
             usage={
                 "prompt_tokens": episode_prompt_tokens,
@@ -735,10 +860,7 @@ async def generate_script(story_id: str, db: AsyncSession, api_key: str = "", ba
             },
             response_text=content,
         )
-        try:
-            yield _parse_json(content)
-        except Exception:
-            yield {"episode": ep["episode"], "title": ep["title"], "scenes": []}
+        yield parsed_episode
 
     yield {"__usage__": {"prompt_tokens": total_prompt, "completion_tokens": total_completion}}
 
@@ -771,11 +893,15 @@ async def world_building_start(idea: str, db: AsyncSession, api_key: str = "", b
         tracker.record_failure(exc)
         raise
     response_text = resp.choices[0].message.content
-    tracker.record_success(usage=getattr(resp, "usage", None), response_text=response_text)
-    data = _parse_json(response_text)
-    messages.append({"role": "assistant", "content": response_text})
-    await repo.save_story(db, story_id, {"idea": idea, "wb_history": messages, "wb_turn": 1})
-    usage = resp.usage
+    usage = getattr(resp, "usage", None)
+    try:
+        data = _parse_json(response_text)
+        messages.append({"role": "assistant", "content": response_text})
+        await repo.save_story(db, story_id, {"idea": idea, "wb_history": messages, "wb_turn": 1})
+    except Exception as exc:
+        tracker.record_failure(exc, usage=usage, response_text=response_text)
+        raise
+    tracker.record_success(usage=usage, response_text=response_text)
     return {
         "story_id": story_id,
         "status": data.get("status", "questioning"),
@@ -814,17 +940,21 @@ async def world_building_turn(story_id: str, answer: str, db: AsyncSession, api_
         tracker.record_failure(exc)
         raise
     response_text = resp.choices[0].message.content
-    tracker.record_success(usage=getattr(resp, "usage", None), response_text=response_text)
-    data = _parse_json(response_text)
-    history = history + [{"role": "assistant", "content": response_text}]
-    new_turn = turn + 1
-    updates = {"wb_history": history, "wb_turn": new_turn}
-    if data.get("status") == "complete":
-        updates["selected_setting"] = data.get("world_summary", "")
-    await repo.save_story(db, story_id, updates)
-    if data.get("status") == "complete":
-        await repo.invalidate_story_consistency_cache(db, story_id, scene_style=True)
-    usage = resp.usage
+    usage = getattr(resp, "usage", None)
+    try:
+        data = _parse_json(response_text)
+        history = history + [{"role": "assistant", "content": response_text}]
+        new_turn = turn + 1
+        updates = {"wb_history": history, "wb_turn": new_turn}
+        if data.get("status") == "complete":
+            updates["selected_setting"] = data.get("world_summary", "")
+        await repo.save_story(db, story_id, updates)
+        if data.get("status") == "complete":
+            await repo.invalidate_story_consistency_cache(db, story_id, scene_style=True)
+    except Exception as exc:
+        tracker.record_failure(exc, usage=usage, response_text=response_text)
+        raise
+    tracker.record_success(usage=usage, response_text=response_text)
     return {
         "story_id": story_id,
         "status": data.get("status", "questioning"),
@@ -867,52 +997,66 @@ async def apply_chat(story_id: str, change_type: str, chat_history: list, curren
         tracker.record_failure(exc)
         raise
     response_text = resp.choices[0].message.content
-    tracker.record_success(usage=getattr(resp, "usage", None), response_text=response_text)
+    usage = getattr(resp, "usage", None)
     try:
         data = _parse_json(response_text)
     except Exception as e:
-        print(f"[APPLY_CHAT] JSON 解析失败: {e!r} | 原始响应: {response_text!r:.500}")
+        tracker.record_failure(e, usage=usage, response_text=response_text)
+        logger.warning(
+            "Apply chat response JSON parsing failed story_id=%s change_type=%s error_type=%s response_chars=%s",
+            story_id,
+            change_type,
+            type(e).__name__,
+            len(str(response_text or "")),
+        )
         return {}
 
-    if change_type == "character":
-        characters = list(story.get("characters") or [])
-        current_id = str(authoritative_item.get("id", "")).strip()
-        updated_character = None
-        for c in characters:
-            if current_id and str(c.get("id", "")).strip() == current_id:
-                c["description"] = data.get("description", c.get("description", ""))
-                updated_character = dict(c)
-                break
-            if not current_id and c.get("name") == authoritative_item.get("name"):
-                c["description"] = data.get("description", c.get("description", ""))
-                updated_character = dict(c)
-                break
-        if characters:
-            await repo.save_story(db, story_id, {"characters": characters, "scenes": []})
-            await repo.invalidate_story_consistency_cache(db, story_id, appearance=True)
-        if updated_character is not None:
-            return {
-                "name": updated_character.get("name", authoritative_item.get("name", "")),
-                "role": updated_character.get("role", authoritative_item.get("role", "")),
-                "description": updated_character.get("description", authoritative_item.get("description", "")),
-            }
-    else:
-        outline = list(story.get("outline") or [])
-        current_episode_number = _normalize_episode_number(authoritative_item.get("episode"))
-        updated_episode = None
-        for ep in outline:
-            if _normalize_episode_number(ep.get("episode")) == current_episode_number:
-                ep.update(_normalize_episode_outline_payload(data, fallback_episode=ep))
-                updated_episode = dict(ep)
-                break
-        if outline:
-            await repo.save_story(
-                db,
-                story_id,
-                {"outline": outline, "meta": dict(story.get("meta") or {}), "scenes": []},
-            )
-            await repo.invalidate_story_consistency_cache(db, story_id, scene_style=True)
-        if updated_episode is not None:
-            return updated_episode
+    try:
+        if change_type == "character":
+            characters = list(story.get("characters") or [])
+            current_id = str(authoritative_item.get("id", "")).strip()
+            updated_character = None
+            for c in characters:
+                if current_id and str(c.get("id", "")).strip() == current_id:
+                    c["description"] = data.get("description", c.get("description", ""))
+                    updated_character = dict(c)
+                    break
+                if not current_id and c.get("name") == authoritative_item.get("name"):
+                    c["description"] = data.get("description", c.get("description", ""))
+                    updated_character = dict(c)
+                    break
+            if characters:
+                await repo.save_story(db, story_id, {"characters": characters, "scenes": []})
+                await repo.invalidate_story_consistency_cache(db, story_id, appearance=True)
+            if updated_character is not None:
+                tracker.record_success(usage=usage, response_text=response_text)
+                return {
+                    "name": updated_character.get("name", authoritative_item.get("name", "")),
+                    "role": updated_character.get("role", authoritative_item.get("role", "")),
+                    "description": updated_character.get("description", authoritative_item.get("description", "")),
+                }
+        else:
+            outline = list(story.get("outline") or [])
+            current_episode_number = _normalize_episode_number(authoritative_item.get("episode"))
+            updated_episode = None
+            for ep in outline:
+                if _normalize_episode_number(ep.get("episode")) == current_episode_number:
+                    ep.update(_normalize_episode_outline_payload(data, fallback_episode=ep))
+                    updated_episode = dict(ep)
+                    break
+            if outline:
+                await repo.save_story(
+                    db,
+                    story_id,
+                    {"outline": outline, "meta": dict(story.get("meta") or {}), "scenes": []},
+                )
+                await repo.invalidate_story_consistency_cache(db, story_id, scene_style=True)
+            if updated_episode is not None:
+                tracker.record_success(usage=usage, response_text=response_text)
+                return updated_episode
+    except Exception as exc:
+        tracker.record_failure(exc, usage=usage, response_text=response_text)
+        raise
 
+    tracker.record_success(usage=usage, response_text=response_text)
     return data

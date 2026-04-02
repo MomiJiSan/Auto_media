@@ -3,8 +3,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from fastapi import HTTPException
+
 from app.services.llm.telemetry import LLMCallTracker
-from app.services.story_llm import analyze_idea
+from app.services.story_llm import analyze_idea, generate_outline
 from app.services.storyboard import parse_script_to_storyboard
 
 
@@ -171,3 +173,71 @@ class StoryLlmTelemetryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         tracker.record_failure.assert_not_called()
         tracker.record_success.assert_called_once()
         self.assertEqual(result["usage"], {"prompt_tokens": 11, "completion_tokens": 7})
+
+    async def test_analyze_idea_records_failure_when_persistence_fails_after_llm_response(self):
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content='{"analysis":"分析","suggestions":["建议"],"placeholder":"占位提示"}'
+                    )
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=11, completion_tokens=7),
+        )
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(create=AsyncMock(return_value=response))
+            )
+        )
+        tracker = SimpleNamespace(record_failure=Mock(), record_success=Mock())
+
+        with patch("app.services.story_llm._make_client", return_value=fake_client):
+            with patch("app.services.story_llm._build_llm_tracker", return_value=tracker):
+                with patch("app.services.story_llm.repo.save_story", new=AsyncMock(side_effect=RuntimeError("db down"))):
+                    with self.assertRaises(RuntimeError):
+                        await analyze_idea(
+                            "雨夜古镇",
+                            "古风",
+                            "克制",
+                            db=object(),
+                            api_key="fake-key",
+                            provider="openai",
+                        )
+
+        tracker.record_success.assert_not_called()
+        tracker.record_failure.assert_called_once()
+
+    async def test_generate_outline_records_failure_when_outline_validation_fails(self):
+        async def fake_stream():
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content='{"meta":{"episodes":6},"outline":[{"episode":1,"title":"第一集","summary":"摘要","beats":["Beat 1"],"scene_list":["Scene 1"]}]}'
+                        )
+                    )
+                ]
+            )
+
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(create=AsyncMock(return_value=fake_stream()))
+            )
+        )
+        tracker = SimpleNamespace(record_failure=Mock(), record_success=Mock(), mark_first_token=Mock())
+
+        with patch("app.services.story_llm._make_client", return_value=fake_client):
+            with patch("app.services.story_llm._build_llm_tracker", return_value=tracker):
+                with self.assertRaises(HTTPException):
+                    await generate_outline(
+                        "story-invalid-outline",
+                        selected_setting="新的世界观设定",
+                        db=object(),
+                        api_key="fake-key",
+                        provider="qwen",
+                        model="qwen-max",
+                    )
+
+        tracker.record_success.assert_not_called()
+        tracker.record_failure.assert_called_once()
