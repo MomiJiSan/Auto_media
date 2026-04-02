@@ -100,6 +100,7 @@ import { useStoryStore } from '../stores/story.js'
 import { useSettingsStore } from '../stores/settings.js'
 import { streamScript } from '../api/story.js'
 import { canAccessStep, getStepRedirectPath } from '../utils/stepAccess.js'
+import { cloneSerializable, formatEpisodeList, getIncompleteScriptEpisodes, hasCompleteGeneratedScript } from '../utils/scriptValidation.js'
 
 const router = useRouter()
 const store = useStoryStore()
@@ -112,7 +113,10 @@ const keyModalType = ref('missing')
 const keyModalMsg = ref('')
 const currentEpisodeIndex = ref(0)
 const userPinnedEpisode = ref(false)
-const done = computed(() => store.step3Done && store.scenes.length > 0)
+const done = computed(() => store.step3Done && hasCompleteGeneratedScript({
+  outline: store.outline,
+  scenes: store.scenes,
+}))
 const started = computed(() => streaming.value || done.value || store.scenes.length > 0)
 const episodeCount = computed(() => store.scenes.length)
 const currentEpisode = computed(() => store.scenes[currentEpisodeIndex.value] || null)
@@ -157,10 +161,53 @@ function isAuthError(msg) {
   return /401|403|invalid|incorrect|unauthorized|api.?key/i.test(msg)
 }
 
+function captureScriptSnapshot() {
+  const hasValidScript = hasCompleteGeneratedScript({
+    outline: store.outline,
+    scenes: store.scenes,
+  })
+
+  return {
+    hasValidScript,
+    scenes: cloneSerializable(store.scenes, []),
+    meta: cloneSerializable(store.meta, null),
+    sceneReferenceAssets: cloneSerializable(store.sceneReferenceAssets, {}),
+    shots: cloneSerializable(store.shots, []),
+    storyboardFinalVideoUrl: store.storyboardFinalVideoUrl || '',
+    manualProjectId: store.manualProjectId || '',
+    manualPipelineId: store.manualPipelineId || '',
+    manualStoryId: store.manualStoryId || '',
+  }
+}
+
+function rollbackScriptGeneration(snapshot, message) {
+  if (snapshot?.hasValidScript) {
+    store.meta = cloneSerializable(snapshot.meta, null)
+    store.scenes = cloneSerializable(snapshot.scenes, [])
+    store.sceneReferenceAssets = cloneSerializable(snapshot.sceneReferenceAssets, {})
+    store.setShots(cloneSerializable(snapshot.shots, []))
+    store.setStoryboardFinalVideoUrl(snapshot.storyboardFinalVideoUrl || '')
+    store.setManualPipelineContext({
+      projectId: snapshot.manualProjectId || '',
+      pipelineId: snapshot.manualPipelineId || '',
+      storyId: snapshot.manualStoryId || '',
+    })
+    store.step3Done = true
+    store.ensureSceneReferenceAssets()
+  } else {
+    store.resetScenes()
+    store.step3Done = false
+  }
+
+  store.setStep(3)
+  error.value = message
+}
+
 async function startGenerate() {
   scriptAbortController?.abort()
   const controller = new AbortController()
   scriptAbortController = controller
+  const previousScriptSnapshot = captureScriptSnapshot()
   streaming.value = true
   error.value = ''
   currentEpisodeIndex.value = 0
@@ -171,22 +218,33 @@ async function startGenerate() {
       store.storyId,
       (scene) => store.addScene(scene),
       () => {
-      if (!store.scenes.length) {
-        store.step3Done = false
-        error.value = '未生成有效剧本内容，请重试'
+      const incompleteEpisodes = getIncompleteScriptEpisodes({
+        outline: store.outline,
+        scenes: store.scenes,
+      })
+      if (incompleteEpisodes.length > 0) {
+        const suffix = previousScriptSnapshot?.hasValidScript ? '，已回滚到上一次有效结果' : ''
+        rollbackScriptGeneration(
+          previousScriptSnapshot,
+          `剧本生成不完整：${formatEpisodeList(incompleteEpisodes)} 未生成有效场景${suffix}`
+        )
         return
       }
       store.step3Done = true
       store.setStep(4)
-    },
+      },
       (msg) => {
-      store.step3Done = false
+      const normalizedMessage = msg || '生成失败，请重试'
+      rollbackScriptGeneration(
+        previousScriptSnapshot,
+        previousScriptSnapshot?.hasValidScript
+          ? `${normalizedMessage}，已回滚到上一次有效结果`
+          : normalizedMessage
+      )
       if (isAuthError(msg)) {
         keyModalType.value = 'invalid'
         keyModalMsg.value = 'API Key 无效或已过期，请检查后重新设置。'
         showKeyModal.value = true
-      } else {
-        error.value = msg || '生成失败，请重试'
       }
     },
       controller.signal

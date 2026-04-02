@@ -21,6 +21,51 @@ router = APIRouter(prefix="/api/v1/story", tags=["story"])
 logger = logging.getLogger(__name__)
 
 
+def _normalize_episode_number(value: object) -> int | None:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_incomplete_script_episodes(outline: list[dict], scenes: list[dict]) -> list[int]:
+    if not isinstance(outline, list) or not outline:
+        return []
+
+    scene_map: dict[int, dict] = {}
+    for episode in scenes or []:
+        if not isinstance(episode, dict):
+            continue
+        episode_number = _normalize_episode_number(episode.get("episode"))
+        if episode_number is None or episode_number in scene_map:
+            continue
+        scene_map[episode_number] = episode
+
+    incomplete_episodes: list[int] = []
+    for episode in outline:
+        if not isinstance(episode, dict):
+            continue
+        episode_number = _normalize_episode_number(episode.get("episode"))
+        if episode_number is None:
+            continue
+        matched_episode = scene_map.get(episode_number)
+        matched_scenes = matched_episode.get("scenes") if isinstance(matched_episode, dict) else None
+        if not isinstance(matched_scenes, list) or len(matched_scenes) == 0:
+            incomplete_episodes.append(episode_number)
+
+    return incomplete_episodes
+
+
+def _has_complete_script(outline: list[dict], scenes: list[dict]) -> bool:
+    if not isinstance(outline, list) or not outline:
+        return False
+    return len(_get_incomplete_script_episodes(outline, scenes)) == 0
+
+
+def _format_episode_list(episodes: list[int]) -> str:
+    return "、".join(f"第 {episode} 集" for episode in episodes)
+
+
 class SceneReferenceGenerateRequest(BaseModel):
     episode: int
     force_regenerate: bool = False
@@ -39,7 +84,7 @@ async def list_stories(db: AsyncSession = Depends(get_db)):
         result.append({
             **s,
             "scene_count": scene_count,
-            "has_script": len(full.get("scenes", [])) > 0,
+            "has_script": _has_complete_script(full.get("outline", []), full.get("scenes", [])),
             "has_character_images": bool(full.get("character_images")),
         })
     return result
@@ -137,6 +182,16 @@ async def api_generate_script(req: GenerateScriptRequest, request: Request, llm:
             )
             yield f"data: [ERROR] {str(e)}\n\n"
         if success:
+            incomplete_episodes = _get_incomplete_script_episodes(
+                story_record.get("outline", []),
+                scenes,
+            )
+            if incomplete_episodes:
+                yield (
+                    "data: [ERROR] "
+                    f"剧本生成不完整：{_format_episode_list(incomplete_episodes)} 未生成有效场景，请重试\n\n"
+                )
+                return
             await repo.save_story(db, req.story_id, {"scenes": scenes})
             yield "data: [DONE]\n\n"
 
@@ -203,8 +258,8 @@ async def finalize_script(story_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="剧本不存在")
 
     scenes = story.get("scenes", [])
-    if not scenes:
-        raise HTTPException(status_code=404, detail="剧本尚未生成，请先调用 generate-script")
+    if not _has_complete_script(story.get("outline", []), scenes):
+        raise HTTPException(status_code=404, detail="剧本尚未完整生成，请先调用 generate-script")
 
     script_text = serialize_story_to_script(story)
     return {"story_id": story_id, "script": script_text}
@@ -220,8 +275,8 @@ async def build_storyboard_script(
     story = await repo.get_story(db, story_id)
     if not story:
         raise HTTPException(status_code=404, detail="剧本不存在")
-    if not story.get("scenes", []):
-        raise HTTPException(status_code=404, detail="剧本尚未生成，请先调用 generate-script")
+    if not _has_complete_script(story.get("outline", []), story.get("scenes", [])):
+        raise HTTPException(status_code=404, detail="剧本尚未完整生成，请先调用 generate-script")
 
     selected_scene_numbers = None
     if isinstance(body, dict):
