@@ -4,7 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from app.services.ffmpeg import _extract_frame, _resolve_image_output_path, extract_last_frame, resolve_media_binary
+from app.paths import MEDIA_DIR
+from app.services.ffmpeg import _extract_frame, _resolve_image_output_path, extract_last_frame, resolve_media_binary, url_to_local_path
 
 TMP_ROOT = Path(__file__).resolve().parents[1] / ".tmp" / "tests"
 TMP_ROOT.mkdir(parents=True, exist_ok=True)
@@ -100,3 +101,14 @@ class ExtractFramePathTests(unittest.IsolatedAsyncioTestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, "未生成有效输出文件"):
                     await _extract_frame(str(video_path), str(output_path))
+
+
+class UrlToLocalPathTests(unittest.TestCase):
+    def test_url_to_local_path_resolves_absolute_media_url_without_matching_request_base(self):
+        resolved = url_to_local_path(
+            "https://cdn.example.com/media/videos/sample.mp4?signature=test",
+            "http://testserver",
+        )
+
+        expected = str((MEDIA_DIR.parent / "media/videos/sample.mp4").resolve(strict=False))
+        self.assertEqual(resolved, expected)
